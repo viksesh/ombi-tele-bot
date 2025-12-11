@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  ombi-tele-bot:
+    build: .
+    container_name: ombi-tele-bot
+    restart: unless-stopped
+    # No ports needed - bot uses Telegram polling
+    # Webhook is handled by AWS Lambda (see lambda/ directory)
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OMBI_URL=${OMBI_URL}
+      - OMBI_API_KEY=${OMBI_API_KEY}
+      - OMBI_REQUEST_USER=${OMBI_REQUEST_USER:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}  # Set to WARNING or ERROR to reduce logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"      # Rotate at 10MB
+        max-file: "5"        # Keep 5 rotated files (50MB total max)
+        compress: "true"     # Compress old logs
+    networks:
+      - ombi-network  # Adjust to match your Ombi network
+
+networks:
+  ombi-network:
+    external: true  # Use your existing network, or remove this and create internal network
+
