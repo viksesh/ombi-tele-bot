@@ -23,4 +23,10 @@ env/
 .DS_Store
 README.md
 *.md
+lambda/
+deploy.sh
+run_local.sh
+start.sh
+docker-compose.yml
+Dockerfile
 

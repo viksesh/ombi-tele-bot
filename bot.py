@@ -67,6 +67,9 @@ except ValueError as e:
 
 # Get environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# Strip quotes if present (common when setting env vars in Docker/shell scripts)
+if TELEGRAM_BOT_TOKEN:
+    TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN.strip('"\' ')
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
@@ -859,12 +862,18 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
     
     try:
         # Search Ombi (without year)
+        logger.info(f"Searching for {item_type} with query: '{query_text}'")
         if item_type == 'movie':
             results = ombi_client.search_movie(query_text)
         else:
             results = ombi_client.search_tv(query_text)
         
+        logger.info(f"Search returned {len(results) if results else 0} results for query: '{query_text}'")
+        if results:
+            logger.debug(f"First result keys: {list(results[0].keys()) if results else 'N/A'}")
+        
         if not results:
+            logger.warning(f"No results found for {item_type} query: '{query_text}'")
             await update.message.reply_text(
                 f"❌ No {item_type} found matching '{query_text}'.\n\n"
                 "Please try a different search term or return to the main menu.",
