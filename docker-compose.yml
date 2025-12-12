@@ -24,10 +24,5 @@ services:
         max-size: "10m"      # Rotate at 10MB
         max-file: "5"        # Keep 5 rotated files (50MB total max)
         compress: "true"     # Compress old logs
-    networks:
-      - ombi-network  # Adjust to match your Ombi network
 
-networks:
-  ombi-network:
-    external: true  # Use your existing network, or remove this and create internal network
 
