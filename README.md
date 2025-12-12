@@ -33,6 +33,40 @@ The following environment variables are required:
 - `OMBI_REQUEST_USER` - (Optional) Ombi username to make requests on behalf of (e.g., `requests`). If not set, requests will be made using the API key only.
 - `LOG_LEVEL` - (Optional) Logging level: `DEBUG`, `INFO` (default), `WARNING`, or `ERROR`. Set to `WARNING` or `ERROR` to reduce log volume and storage usage.
 - `LOG_FILE` - (Optional) Path to log file. If set, logs will be written to file with rotation (10MB max, 5 backups). Default: logs to console only (Docker captures these).
+- `ENABLE_GROUP_AUTH` - (Optional) Feature flag to restrict bot usage to members of authorized Telegram group(s). Set to `true`, `1`, or `yes` to enable. When enabled, only users who are members of at least one of the groups specified by `AUTHORIZED_GROUP_CHAT_ID` or `AUTHORIZED_GROUP_CHAT_IDS` can use the bot. Default: disabled (all users can use the bot).
+- `AUTHORIZED_GROUP_CHAT_ID` or `AUTHORIZED_GROUP_CHAT_IDS` - (Optional) Telegram group chat ID(s) where authorized users must be members. Required if `ENABLE_GROUP_AUTH` is enabled. Can be a single group chat ID or a comma-separated list of group chat IDs. The bot must be added to all specified groups. See below for instructions on finding group chat IDs.
+  - **Single group**: `AUTHORIZED_GROUP_CHAT_ID=-1001234567890`
+  - **Multiple groups**: `AUTHORIZED_GROUP_CHAT_IDS=-1001234567890,-1009876543210,-1001112223334`
+  - Both environment variable names are supported for backward compatibility
+
+### Group Authorization Feature
+
+When `ENABLE_GROUP_AUTH` is enabled, the bot will verify that users are members of at least one of the authorized groups before allowing them to:
+- Start the bot (`/start` command)
+- Search for movies/TV shows
+- Submit requests
+
+**How to find your group chat ID:**
+
+1. **Method 1: Using @userinfobot**
+   - Add `@userinfobot` to your Telegram group
+   - The bot will send a message with the group's chat ID
+
+2. **Method 2: Using the bot itself**
+   - Add your bot to the group
+   - Check the bot logs - when the bot receives a message from the group, it will log the chat ID
+   - Look for log entries containing the chat ID
+
+3. **Method 3: Using Telegram API**
+   - Forward a message from the group to `@userinfobot` or use a Telegram client that shows chat IDs
+   - The chat ID will be a negative number (e.g., `-1001234567890`)
+
+**Important notes:**
+- The bot must be added to all authorized group chats
+- Users must be active members of at least one authorized group (not left or kicked)
+- Users who are members of ANY of the authorized groups will be granted access
+- If the bot is not in a group or a group chat ID is incorrect, that group will be skipped and other groups will still be checked
+- The authorization check happens on every interaction, so users who leave all authorized groups will immediately lose access
 
 ### Notification Webhook (AWS Lambda)
 

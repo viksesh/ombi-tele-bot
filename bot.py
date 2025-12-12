@@ -6,6 +6,7 @@ import requests
 from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.error import TelegramError
 from ombi_client import OmbiClient
 
 # Load environment variables from .env file if available
@@ -69,6 +70,119 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
+
+# Group authorization feature flag
+ENABLE_GROUP_AUTH = os.getenv('ENABLE_GROUP_AUTH', '').lower() in ('true', '1', 'yes')
+AUTHORIZED_GROUP_CHAT_IDS_STR = os.getenv('AUTHORIZED_GROUP_CHAT_ID', '').strip() or os.getenv('AUTHORIZED_GROUP_CHAT_IDS', '').strip()
+# Parse comma-separated list of group chat IDs, supporting both singular and plural env var names
+AUTHORIZED_GROUP_CHAT_IDS = [gid.strip() for gid in AUTHORIZED_GROUP_CHAT_IDS_STR.split(',') if gid.strip()] if AUTHORIZED_GROUP_CHAT_IDS_STR else []
+
+
+async def is_user_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
+    """Check if user is authorized to use the bot.
+    
+    Checks if user is a member of any of the authorized group chats.
+    
+    Returns:
+        tuple: (is_authorized: bool, error_message: str)
+        - If feature is disabled, returns (True, "")
+        - If authorized (member of any group), returns (True, "")
+        - If not authorized, returns (False, error_message)
+    """
+    # If feature is disabled, allow all users
+    if not ENABLE_GROUP_AUTH:
+        return (True, "")
+    
+    # If group chat IDs are not configured, log warning and allow access
+    if not AUTHORIZED_GROUP_CHAT_IDS:
+        logger.warning("ENABLE_GROUP_AUTH is enabled but AUTHORIZED_GROUP_CHAT_ID/AUTHORIZED_GROUP_CHAT_IDS is not set. Allowing access.")
+        return (True, "")
+    
+    # Get user ID from update
+    user = update.effective_user
+    if not user:
+        logger.warning("Could not get user from update")
+        return (False, "❌ Unable to verify your identity. Please try again.")
+    
+    user_id = user.id
+    
+    # Track errors for logging
+    last_error = None
+    groups_checked = 0
+    
+    try:
+        # Get the bot instance from the application
+        bot = context.bot
+        
+        # Check if user is a member of ANY of the authorized groups
+        for group_chat_id in AUTHORIZED_GROUP_CHAT_IDS:
+            groups_checked += 1
+            try:
+                chat_member = await bot.get_chat_member(
+                    chat_id=group_chat_id,
+                    user_id=user_id
+                )
+                
+                # Check if user is a valid member (not left, not kicked)
+                # Valid statuses: 'member', 'administrator', 'creator'
+                # Invalid statuses: 'left', 'kicked'
+                # Note: 'left' status is returned both for users who left and users who were never in the group
+                # Restricted members are allowed but logged
+                status = chat_member.status
+                if status in ('member', 'administrator', 'creator'):
+                    logger.debug(f"User {user_id} ({user.username or 'no username'}) is authorized in group {group_chat_id} (status: {status})")
+                    return (True, "")
+                elif status == 'restricted':
+                    # Restricted members might still be able to use the bot depending on permissions
+                    # For now, we'll allow them but log it
+                    logger.info(f"User {user_id} ({user.username or 'no username'}) is restricted member in group {group_chat_id}, allowing access")
+                    return (True, "")
+                elif status in ('left', 'kicked'):
+                    # User left, was kicked, or was never in this group
+                    # Continue checking other groups
+                    logger.debug(f"User {user_id} ({user.username or 'no username'}) is not a member of group {group_chat_id} (status: {status})")
+                    continue
+                else:
+                    # Unknown status - continue checking other groups
+                    logger.warning(f"User {user_id} ({user.username or 'no username'}) has unknown status in group {group_chat_id}: {status}")
+                    continue
+            
+            except TelegramError as e:
+                error_msg = str(e).lower()
+                last_error = e
+                
+                # Handle specific error cases
+                if "chat not found" in error_msg or "group chat was upgraded to a supergroup" in error_msg:
+                    logger.warning(f"Authorized group chat not found or upgraded. Chat ID: {group_chat_id}. Error: {e}")
+                    # Continue checking other groups
+                    continue
+                elif "user not found" in error_msg or "user is not a member" in error_msg:
+                    # User was never in this group or left before bot could track them
+                    # Continue checking other groups
+                    logger.debug(f"User {user_id} ({user.username or 'no username'}) not found in group {group_chat_id} (never joined or left)")
+                    continue
+                elif "bot is not a member" in error_msg:
+                    logger.warning(f"Bot is not a member of group {group_chat_id}. Skipping this group.")
+                    # Continue checking other groups
+                    continue
+                else:
+                    # Unknown error - log but continue checking other groups
+                    logger.warning(f"Error checking group membership for user {user_id} in group {group_chat_id}: {e}")
+                    continue
+        
+        # User is not a member of any authorized group
+        if groups_checked > 0:
+            logger.info(f"User {user_id} ({user.username or 'no username'}) is not a member of any authorized group (checked {groups_checked} group(s))")
+            return (False, "❌ You are not authorized to use this bot. Contact admin and please join the authorized group to request content.")
+        else:
+            # No groups were successfully checked (all had errors)
+            logger.error(f"Could not check any authorized groups for user {user_id}. Last error: {last_error}")
+            return (False, "❌ Bot configuration error. Please contact the administrator.")
+    
+    except Exception as e:
+        # Unexpected error
+        logger.error(f"Unexpected error checking authorization for user {user_id}: {e}", exc_info=True)
+        return (False, "❌ An error occurred while checking authorization. Please try again later.")
 
 
 def get_item_status(item: dict):
@@ -304,6 +418,12 @@ def get_poster_url(item: dict, base_url: str = "https://image.tmdb.org/t/p/w500"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command - show main menu."""
+    # Check authorization
+    is_authorized, error_msg = await is_user_authorized(update, context)
+    if not is_authorized:
+        await update.message.reply_text(error_msg, parse_mode='HTML')
+        return
+    
     keyboard = [
         [InlineKeyboardButton("🎬 Request Movie", callback_data="req_movie")],
         [InlineKeyboardButton("📺 Request TV Show", callback_data="req_tv")]
@@ -321,6 +441,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle callback queries."""
     query = update.callback_query
+    
+    # Check authorization
+    is_authorized, error_msg = await is_user_authorized(update, context)
+    if not is_authorized:
+        await query.answer(error_msg, show_alert=True)
+        return
+    
     await query.answer()
     
     data = query.data
@@ -578,6 +705,12 @@ async def start_from_callback(query, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle search query from user."""
+    # Check authorization
+    is_authorized, error_msg = await is_user_authorized(update, context)
+    if not is_authorized:
+        await update.message.reply_text(error_msg, parse_mode='HTML')
+        return
+    
     if 'request_type' not in context.user_data:
         # User hasn't selected movie/tv yet
         return
