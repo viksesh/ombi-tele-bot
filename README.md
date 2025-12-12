@@ -185,86 +185,26 @@ The Lambda function handles:
 
 ## Production Deployment
 
-In production, you'll typically use a reverse proxy (Nginx, Traefik, Caddy, etc.) instead of ngrok for the webapp. The webhook is handled by AWS Lambda.
+The bot uses polling and doesn't require any exposed ports or reverse proxy. Webhook notifications are handled by AWS Lambda (see [`lambda/`](lambda/) directory).
 
 ### Architecture Overview
 
 ```
-Internet → Reverse Proxy (HTTPS) → Docker Container (HTTP)
-                                    └── Port 8080: Webapp (optional)
+Docker Container (Bot)
+  └── Polling: Bot → Telegram API (outbound only, no ports needed)
 
-Webhook: Ombi → AWS Lambda → Telegram
+Webhook: Ombi → AWS Lambda (API Gateway) → Telegram
 ```
-
-### Option 1: Nginx Reverse Proxy
-
-1. **Update your docker-compose.yml** (see `docker-compose.yml` in the repo)
-
-2. **Configure Nginx** - Copy `nginx.example.conf` and update:
-   - Replace `your-bot-domain.com` with your actual domain
-   - Update SSL certificate paths
-   - Adjust proxy_pass URLs if needed
-
-3. **In Ombi webhook settings**, use:
-   ```
-   https://your-bot-domain.com/notifications/ombi
-   ```
-
-### Option 2: Traefik Reverse Proxy
-
-1. **Update docker-compose.yml** - Add Traefik labels (see `traefik.example.yml`)
-
-2. **Example docker-compose.yml with Traefik labels:**
-   ```yaml
-   services:
-     ombi-tele-bot:
-       # ... other config ...
-       labels:
-         - "traefik.enable=true"
-         - "traefik.http.routers.ombi-bot-webhook.rule=Host(`your-bot-domain.com`) && PathPrefix(`/notifications/ombi`)"
-         - "traefik.http.routers.ombi-bot-webhook.entrypoints=websecure"
-         - "traefik.http.routers.ombi-bot-webhook.tls.certresolver=letsencrypt"
-         - "traefik.http.services.ombi-bot-webhook.loadbalancer.server.port=8081"
-   ```
-
-3. **In Ombi webhook settings**, use:
-   ```
-   https://your-bot-domain.com/notifications/ombi
-   ```
-
-### Option 3: Cloudflare Tunnel (Cloudflared)
-
-If you're using Cloudflare Tunnel, you can expose the webhook port directly:
-
-1. **In your Cloudflare Tunnel config**, add:
-   ```yaml
-   ingress:
-     - hostname: your-bot-domain.com
-       service: http://ombi-tele-bot:8081
-   ```
-
-2. **In Ombi webhook settings**, use:
-   ```
-   https://your-bot-domain.com/notifications/ombi
-   ```
-
-### Port Configuration
-
-- **Webhook**: Port 8081 (configurable via `WEBHOOK_PORT` env var)
-- **Webapp**: Port 8080 (if using the webapp feature)
 
 ### Security Considerations
 
-1. **HTTPS**: Always use HTTPS in production. The reverse proxy should handle SSL termination.
+1. **No Exposed Ports**: The bot uses polling and doesn't require any exposed ports. This reduces the attack surface.
 
-2. **Firewall**: Only expose the reverse proxy port (443/80) to the internet. Don't expose container ports directly.
+2. **Lambda Environment**: Configure Lambda environment variables securely (see `lambda/README.md`). Use AWS Secrets Manager or environment variables for sensitive data.
 
-3. **Lambda Environment**: Configure Lambda environment variables (see `lambda/README.md`).
-
-4. **Network Isolation**: Use Docker networks to isolate services. The bot only needs to communicate with:
+3. **Network Isolation**: Use Docker networks to isolate services. The bot only needs to communicate with:
    - Ombi (internal network)
-   - Telegram API (internet)
-   - Reverse proxy (internal network, if using webapp)
+   - Telegram API (internet, outbound HTTPS only)
 
 ### Testing the Lambda Webhook
 
