@@ -81,10 +81,32 @@ AUTHORIZED_GROUP_CHAT_IDS_STR = os.getenv('AUTHORIZED_GROUP_CHAT_ID', '').strip(
 AUTHORIZED_GROUP_CHAT_IDS = [gid.strip() for gid in AUTHORIZED_GROUP_CHAT_IDS_STR.split(',') if gid.strip()] if AUTHORIZED_GROUP_CHAT_IDS_STR else []
 
 
+def is_message_from_authorized_group(update: Update) -> bool:
+    """Check if message is from an authorized group chat.
+    
+    Returns True if the message is from a group/supergroup that's in AUTHORIZED_GROUP_CHAT_IDS.
+    These messages should be completely ignored by the bot.
+    """
+    if not ENABLE_GROUP_AUTH or not AUTHORIZED_GROUP_CHAT_IDS:
+        return False
+    
+    chat = update.effective_chat
+    if not chat or chat.type not in ('group', 'supergroup'):
+        return False
+    
+    chat_id_str = str(chat.id)
+    if chat_id_str in AUTHORIZED_GROUP_CHAT_IDS:
+        logger.info(f"Ignoring message from authorized group chat {chat_id_str}")
+        return True
+    
+    return False
+
+
 async def is_user_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
     """Check if user is authorized to use the bot.
     
     Checks if user is a member of any of the authorized group chats.
+    Only called for direct/private messages (group messages are handled separately).
     
     Returns:
         tuple: (is_authorized: bool, error_message: str)
@@ -421,6 +443,10 @@ def get_poster_url(item: dict, base_url: str = "https://image.tmdb.org/t/p/w500"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command - show main menu."""
+    # Ignore messages from authorized group chats
+    if is_message_from_authorized_group(update):
+        return
+    
     # Check authorization
     is_authorized, error_msg = await is_user_authorized(update, context)
     if not is_authorized:
@@ -443,6 +469,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle callback queries."""
+    # Ignore callbacks from authorized group chats
+    if is_message_from_authorized_group(update):
+        return
+    
     query = update.callback_query
     
     # Check authorization
@@ -708,6 +738,10 @@ async def start_from_callback(query, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle search query from user."""
+    # Ignore messages from authorized group chats
+    if is_message_from_authorized_group(update):
+        return
+    
     # Check authorization
     is_authorized, error_msg = await is_user_authorized(update, context)
     if not is_authorized:

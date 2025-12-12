@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   ombi-tele-bot:
-    build: .
+    image: viksesh/ombi-tele-bot:1.0
     container_name: ombi-tele-bot
     restart: unless-stopped
     # No ports needed - bot uses Telegram polling
