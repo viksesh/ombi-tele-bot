@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   ombi-tele-bot:
-    image: viksesh/ombi-tele-bot:1.0
+    image: viksesh/ombi-tele-bot:1.1
     container_name: ombi-tele-bot
     restart: unless-stopped
     # No ports needed - bot uses Telegram polling
@@ -13,8 +13,6 @@ services:
       - OMBI_API_KEY=${OMBI_API_KEY}
       - OMBI_REQUEST_USER=${OMBI_REQUEST_USER:-}
       - WEBAPP_URL=${WEBAPP_URL:-}
-      - TELEGRAM_GROUP_CHAT_ID=${TELEGRAM_GROUP_CHAT_ID:-}
-      - TELEGRAM_GROUP_THREAD_ID=${TELEGRAM_GROUP_THREAD_ID:-}
       - ENABLE_GROUP_AUTH=${ENABLE_GROUP_AUTH:-}
       - AUTHORIZED_GROUP_CHAT_IDS=${AUTHORIZED_GROUP_CHAT_IDS:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}  # Set to WARNING or ERROR to reduce logs
