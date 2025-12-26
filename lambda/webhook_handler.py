@@ -4,7 +4,7 @@ import json
 import logging
 import asyncio
 import time
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, List
 from telegram import Bot
 from telegram.error import TelegramError
 
@@ -15,6 +15,7 @@ logger.setLevel(logging.INFO)
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 GROUP_CHAT_ID = os.getenv('TELEGRAM_GROUP_CHAT_ID')
 GROUP_THREAD_ID = os.getenv('TELEGRAM_GROUP_THREAD_ID')
+GROUP_MAPPING_STR = os.getenv('TELEGRAM_GROUP_MAPPING')
 DEDUP_TABLE_NAME = os.getenv('DEDUP_TABLE_NAME')  # Optional DynamoDB table for deduplication
 
 # Try to import boto3 for DynamoDB (optional)
@@ -25,6 +26,53 @@ except ImportError:
     dynamodb = None
     if DEDUP_TABLE_NAME:
         logger.warning("boto3 not available, deduplication disabled")
+
+
+def get_group_mappings() -> List[Tuple[str, Optional[int]]]:
+    """Get list of (chat_id, thread_id) tuples from environment variables.
+    
+    Supports two configuration modes:
+    1. TELEGRAM_GROUP_MAPPING (JSON string) - multiple groups
+    2. TELEGRAM_GROUP_CHAT_ID + TELEGRAM_GROUP_THREAD_ID - single group (backward compatible)
+    
+    Returns:
+        List of tuples: [(chat_id, thread_id), ...]
+        Returns empty list if no valid configuration found.
+    """
+    mappings = []
+    
+    # Priority: TELEGRAM_GROUP_MAPPING takes precedence
+    if GROUP_MAPPING_STR:
+        try:
+            mapping_dict = json.loads(GROUP_MAPPING_STR)
+            if isinstance(mapping_dict, dict):
+                for chat_id_str, thread_id_value in mapping_dict.items():
+                    thread_id = None
+                    if thread_id_value is not None:
+                        try:
+                            thread_id = int(thread_id_value)
+                        except (ValueError, TypeError):
+                            logger.warning(f"Invalid thread_id for chat_id {chat_id_str}: {thread_id_value}")
+                    mappings.append((str(chat_id_str), thread_id))
+                logger.info(f"Loaded {len(mappings)} group(s) from TELEGRAM_GROUP_MAPPING")
+                return mappings
+            else:
+                logger.warning("TELEGRAM_GROUP_MAPPING must be a JSON object, falling back to single group config")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid JSON in TELEGRAM_GROUP_MAPPING: {e}, falling back to single group config")
+    
+    # Fallback to single group configuration (backward compatible)
+    if GROUP_CHAT_ID:
+        thread_id = None
+        if GROUP_THREAD_ID:
+            try:
+                thread_id = int(GROUP_THREAD_ID)
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid GROUP_THREAD_ID: {GROUP_THREAD_ID}")
+        mappings.append((GROUP_CHAT_ID, thread_id))
+        logger.info(f"Using single group configuration: chat_id={GROUP_CHAT_ID}, thread_id={thread_id}")
+    
+    return mappings
 
 
 def run_async(coro):
@@ -129,11 +177,19 @@ def is_duplicate_notification(request_id: str, notification_type: str) -> bool:
         return False
 
 
-async def _send_message(bot: Bot, message: str, photo_url: Optional[str] = None, message_thread_id: Optional[int] = None):
-    """Helper function to send a message or photo."""
+async def _send_message(bot: Bot, chat_id: str, message: str, photo_url: Optional[str] = None, message_thread_id: Optional[int] = None):
+    """Helper function to send a message or photo to a specific chat.
+    
+    Args:
+        bot: Telegram Bot instance
+        chat_id: Target chat ID
+        message: Message text
+        photo_url: Optional photo URL
+        message_thread_id: Optional thread ID for forum topics
+    """
     if photo_url:
         await bot.send_photo(
-            chat_id=GROUP_CHAT_ID,
+            chat_id=chat_id,
             photo=photo_url,
             caption=message,
             parse_mode='HTML',
@@ -141,7 +197,7 @@ async def _send_message(bot: Bot, message: str, photo_url: Optional[str] = None,
         )
     else:
         await bot.send_message(
-            chat_id=GROUP_CHAT_ID,
+            chat_id=chat_id,
             text=message,
             parse_mode='HTML',
             message_thread_id=message_thread_id
@@ -149,84 +205,100 @@ async def _send_message(bot: Bot, message: str, photo_url: Optional[str] = None,
 
 
 def send_group_notification(message: str, thread_id: int = None, photo_url: Optional[str] = None):
-    """Send notification to group chat (optionally in a thread).
+    """Send notification to group chat(s) (optionally in threads).
+    
+    Supports multiple groups via TELEGRAM_GROUP_MAPPING or single group via
+    TELEGRAM_GROUP_CHAT_ID (backward compatible).
     
     Args:
         message: Text message to send
-        thread_id: Optional thread ID for forum topics
+        thread_id: Optional thread ID for forum topics (overrides mapping thread_id)
         photo_url: Optional photo URL to send with the message
+    
+    Returns:
+        True if at least one notification was sent successfully, False otherwise
     """
-    if not GROUP_CHAT_ID or not TELEGRAM_BOT_TOKEN:
-        logger.warning("GROUP_CHAT_ID or TELEGRAM_BOT_TOKEN not configured")
+    if not TELEGRAM_BOT_TOKEN:
+        logger.warning("TELEGRAM_BOT_TOKEN not configured")
         return False
     
-    try:
-        # Use provided thread_id, or fall back to GROUP_THREAD_ID env var
+    # Get group mappings (supports both single and multiple group configs)
+    group_mappings = get_group_mappings()
+    
+    if not group_mappings:
+        logger.warning("No group chat IDs configured (TELEGRAM_GROUP_CHAT_ID or TELEGRAM_GROUP_MAPPING)")
+        return False
+    
+    success_count = 0
+    total_count = len(group_mappings)
+    
+    # Send to each group
+    for chat_id, mapping_thread_id in group_mappings:
+        # Use provided thread_id, or fall back to mapping thread_id
         message_thread_id = None
         if thread_id:
             message_thread_id = int(thread_id)
-        elif GROUP_THREAD_ID:
-            try:
-                message_thread_id = int(GROUP_THREAD_ID)
-            except (ValueError, TypeError):
-                logger.warning(f"Invalid GROUP_THREAD_ID: {GROUP_THREAD_ID}")
+        elif mapping_thread_id is not None:
+            message_thread_id = mapping_thread_id
         
-        logger.info(f"Sending notification to chat_id={GROUP_CHAT_ID}, thread_id={message_thread_id}, has_photo={bool(photo_url)}")
-        
-        async def send_message_async():
-            async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
-                await _send_message(bot, message, photo_url, message_thread_id)
+        logger.info(f"Sending notification to chat_id={chat_id}, thread_id={message_thread_id}, has_photo={bool(photo_url)}")
         
         try:
-            run_async(send_message_async())
-            logger.info(f"Sent notification to {GROUP_CHAT_ID}" + (f" (thread {message_thread_id})" if message_thread_id else ""))
-            return True
+            async def send_message_async():
+                async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+                    await _send_message(bot, chat_id, message, photo_url, message_thread_id)
+            
+            try:
+                run_async(send_message_async())
+                logger.info(f"Sent notification to {chat_id}" + (f" (thread {message_thread_id})" if message_thread_id else ""))
+                success_count += 1
+            except TelegramError as e:
+                error_msg = str(e)
+                
+                # If topic is closed, try reopening it
+                topic_closed_indicators = [
+                    "topic_closed", "topic closed", "topic is closed",
+                    "forum topic is closed", "bad request: topic is closed"
+                ]
+                
+                is_topic_closed = message_thread_id and any(
+                    indicator in error_msg.lower() for indicator in topic_closed_indicators
+                )
+                
+                if is_topic_closed:
+                    logger.warning(f"Topic {message_thread_id} in chat {chat_id} is closed, attempting to reopen")
+                    try:
+                        async def reopen_and_send():
+                            async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+                                await bot.reopen_forum_topic(
+                                    chat_id=chat_id,
+                                    message_thread_id=message_thread_id
+                                )
+                                logger.info(f"Reopened topic {message_thread_id} in chat {chat_id}")
+                                await _send_message(bot, chat_id, message, photo_url, message_thread_id)
+                        
+                        run_async(reopen_and_send())
+                        logger.info(f"Sent notification after reopening topic in chat {chat_id}")
+                        success_count += 1
+                    except TelegramError as reopen_error:
+                        logger.warning(f"Failed to reopen topic in chat {chat_id}: {reopen_error}, sending without thread")
+                        async def send_without_thread():
+                            async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+                                await _send_message(bot, chat_id, message, photo_url, None)
+                        
+                        run_async(send_without_thread())
+                        logger.info(f"Sent notification without thread to chat {chat_id}")
+                        success_count += 1
+                else:
+                    logger.error(f"Failed to send notification to chat {chat_id}: {e}")
+        
         except TelegramError as e:
-            error_msg = str(e)
-            
-            # If topic is closed, try reopening it
-            topic_closed_indicators = [
-                "topic_closed", "topic closed", "topic is closed",
-                "forum topic is closed", "bad request: topic is closed"
-            ]
-            
-            is_topic_closed = message_thread_id and any(
-                indicator in error_msg.lower() for indicator in topic_closed_indicators
-            )
-            
-            if is_topic_closed:
-                logger.warning(f"Topic {message_thread_id} is closed, attempting to reopen")
-                try:
-                    async def reopen_and_send():
-                        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
-                            await bot.reopen_forum_topic(
-                                chat_id=GROUP_CHAT_ID,
-                                message_thread_id=message_thread_id
-                            )
-                            logger.info(f"Reopened topic {message_thread_id}")
-                            await _send_message(bot, message, photo_url, message_thread_id)
-                    
-                    run_async(reopen_and_send())
-                    logger.info(f"Sent notification after reopening topic")
-                    return True
-                except TelegramError as reopen_error:
-                    logger.warning(f"Failed to reopen topic: {reopen_error}, sending without thread")
-                    async def send_without_thread():
-                        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
-                            await _send_message(bot, message, photo_url, None)
-                    
-                    run_async(send_without_thread())
-                    logger.info(f"Sent notification without thread")
-                    return True
-            else:
-                raise
+            logger.error(f"Failed to send notification to chat {chat_id}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error sending to chat {chat_id}: {e}", exc_info=True)
     
-    except TelegramError as e:
-        logger.error(f"Failed to send notification: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
-        return False
+    logger.info(f"Sent notifications to {success_count}/{total_count} group(s)")
+    return success_count > 0
 
 
 def format_approval_notification(data: dict) -> Tuple[str, Optional[str]]:

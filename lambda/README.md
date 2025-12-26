@@ -98,10 +98,26 @@ curl -X POST https://your-api-gateway-url.amazonaws.com/prod/notifications/ombi 
 
 Required:
 - `TELEGRAM_BOT_TOKEN` - Telegram bot token
-- `TELEGRAM_GROUP_CHAT_ID` - Group chat ID
+- Either `TELEGRAM_GROUP_CHAT_ID` OR `TELEGRAM_GROUP_MAPPING` (see below)
 
 Optional:
-- `TELEGRAM_GROUP_THREAD_ID` - Thread ID for topic notifications
+- `TELEGRAM_GROUP_THREAD_ID` - Thread ID for topic notifications (only used with `TELEGRAM_GROUP_CHAT_ID`)
+
+### Single Group Configuration (Simple)
+- `TELEGRAM_GROUP_CHAT_ID` - Group chat ID (negative number)
+- `TELEGRAM_GROUP_THREAD_ID` - Optional thread ID for topic notifications
+
+### Multiple Groups Configuration (Advanced)
+- `TELEGRAM_GROUP_MAPPING` - JSON string mapping chat IDs to thread IDs
+
+**Format:** `{"chat_id_1": thread_id_1, "chat_id_2": thread_id_2, ...}`
+
+**Examples:**
+- Multiple groups with threads: `{"-1001234567890": 123, "-1009876543210": 456}`
+- Multiple groups without threads: `{"-1001234567890": null, "-1009876543210": null}`
+- Mixed (some with threads, some without): `{"-1001234567890": 123, "-1009876543210": null}`
+
+**Note:** When `TELEGRAM_GROUP_MAPPING` is set, notifications will be sent to all configured groups. If both `TELEGRAM_GROUP_CHAT_ID` and `TELEGRAM_GROUP_MAPPING` are set, `TELEGRAM_GROUP_MAPPING` takes precedence.
 
 ## Cost Estimate
 
