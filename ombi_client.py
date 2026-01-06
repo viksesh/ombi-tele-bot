@@ -172,7 +172,10 @@ class OmbiClient:
             True if request was successful, False otherwise
         """
         endpoint = "/Request/tv"
-        data = {"tvDbId": tv_id}
+        # Include requestAll: true to request all seasons by default
+        # Without this, Ombi may only request the first season or not create a request
+        # for multi-season shows, which can cause requests to not show up in pending
+        data = {"tvDbId": tv_id, "requestAll": True}
         
         # Username is passed via UserName header (set in __init__)
         if self.request_user:
