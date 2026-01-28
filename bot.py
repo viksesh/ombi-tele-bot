@@ -3,11 +3,13 @@ import json
 import logging
 import re
 import requests
+from datetime import datetime
 from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
 from ombi_client import OmbiClient
+from nzb_client import NZBClient
 
 # Load environment variables from .env file if available
 try:
@@ -64,6 +66,12 @@ try:
 except ValueError as e:
     logger.error(f"Failed to initialize Ombi client: {e}")
     ombi_client = None
+
+# Initialize NZB client for auto-approve feature
+nzb_client = NZBClient()
+
+# Auto-approve user (user with auto-approval rights in Ombi)
+OMBI_AUTO_APPROVE_USER = os.getenv('OMBI_AUTO_APPROVE_USER', 'requests-auto').strip()
 
 # Get environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -670,20 +678,114 @@ async def show_result(query, context: ContextTypes.DEFAULT_TYPE, item_type: str,
             )
 
 
+def get_item_year(item: dict, item_type: str) -> int:
+    """Extract the year from an item."""
+    if item_type == 'movie':
+        year = (item.get('releaseDate') or item.get('release_date') or
+                item.get('year') or item.get('Year') or
+                item.get('releaseYear'))
+    else:
+        year = (item.get('firstAired') or item.get('firstAirDate') or
+                item.get('first_air_date') or item.get('year') or
+                item.get('Year') or item.get('releaseYear') or
+                item.get('firstAirYear'))
+
+    if year:
+        if isinstance(year, str) and len(year) >= 4:
+            year_match = re.search(r'(\d{4})', str(year))
+            if year_match:
+                return int(year_match.group(1))
+        elif isinstance(year, int):
+            return year
+    return 0
+
+
+def should_auto_approve(item: dict, item_type: str) -> tuple[bool, str]:
+    """Check if request should be auto-approved.
+
+    Returns:
+        tuple: (should_auto_approve, reason)
+    """
+    title = item.get('title') or item.get('Title') or item.get('name') or 'Unknown'
+    logger.info(f"Checking auto-approve for {item_type}: {title}")
+
+    # Check if year is current year (new releases)
+    current_year = datetime.now().year
+    year = get_item_year(item, item_type)
+    logger.debug(f"Item year: {year}, current year: {current_year}")
+    if year == current_year:
+        logger.info(f"Auto-approve triggered: year is {current_year}")
+        return (True, f"year is {current_year}")
+
+    # Check if item exists in NZB
+    if not nzb_client.enabled:
+        logger.debug("NZB client not enabled, skipping NZB check")
+        return (False, "")
+
+    # Get title for search
+    if item_type == 'movie':
+        title = (item.get('title') or item.get('Title') or
+                 item.get('movieTitle') or item.get('name') or '')
+        imdb_id = item.get('imdbId') or item.get('imdbid')
+        if nzb_client.search_movie(title, imdb_id):
+            return (True, "found in NZB")
+    else:
+        title = (item.get('title') or item.get('Title') or
+                 item.get('name') or item.get('Name') or
+                 item.get('seriesName') or '')
+        # Use tvdbId for more deterministic search
+        tvdb_id = (item.get('theTvDbId') or item.get('tvDbId') or
+                   item.get('tvdbId'))
+        if nzb_client.search_tv(title, tvdb_id):
+            return (True, "found in NZB")
+
+    return (False, "")
+
+
 async def handle_request(query, context: ContextTypes.DEFAULT_TYPE, item_type: str, item_id: int):
     """Handle request for an item."""
     if not ombi_client:
         await query.answer("❌ Ombi client not configured!", show_alert=True)
         return
-    
+
     try:
-        # Request the item
+        # Get the item from stored results to check for auto-approve conditions
+        results_key = f'{item_type}_results'
+        item = None
+        if results_key in context.user_data:
+            results = context.user_data[results_key]
+            # Find the item with matching ID
+            for result in results:
+                result_id = (result.get('theTvDbId') or result.get('theMovieDbId') or
+                             result.get('tvDbId') or result.get('tvdbId') or
+                             result.get('id') or result.get('Id') or
+                             result.get('movieDbId') or result.get('seriesId'))
+                # Compare as strings to handle type mismatches
+                if str(result_id) == str(item_id):
+                    item = result
+                    logger.debug(f"Found item in results: {result.get('title', 'Unknown')}")
+                    break
+
+            if not item:
+                logger.warning(f"Could not find item with ID {item_id} in stored results")
+
+        # Determine if we should auto-approve
+        auto_approve = False
+        auto_reason = ""
+        if item:
+            auto_approve, auto_reason = should_auto_approve(item, item_type)
+            if auto_approve:
+                logger.info(f"Auto-approving {item_type} request (ID: {item_id}): {auto_reason}")
+
+        # Request the item with appropriate user
         success = False
+        user_override = OMBI_AUTO_APPROVE_USER if auto_approve else None
+
         if item_type == 'movie':
-            success = ombi_client.request_movie(item_id)
+            success = ombi_client.request_movie(item_id, user_override)
         else:
-            success = ombi_client.request_tv(item_id)
-        
+            success = ombi_client.request_tv(item_id, user_override)
+
         if success:
             await query.answer("✅ Request submitted successfully!", show_alert=True)
             # Try to update caption if it's a photo, otherwise update text

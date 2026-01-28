@@ -41,13 +41,14 @@ class OmbiClient:
         if self.request_user:
             self.headers['UserName'] = self.request_user
     
-    def _make_request(self, method: str, endpoint: str, **kwargs) -> Optional[Dict]:
+    def _make_request(self, method: str, endpoint: str, headers: Dict = None, **kwargs) -> Optional[Dict]:
         """Make a request to the Ombi API."""
         url = f"{self.base_url}/api/v1{endpoint}"
-        
+        request_headers = headers if headers else self.headers
+
         try:
             logger.debug(f"Making {method} request to: {url}")
-            response = requests.request(method, url, headers=self.headers, **kwargs)
+            response = requests.request(method, url, headers=request_headers, **kwargs)
             response.raise_for_status()
             
             if response.content:
@@ -140,34 +141,46 @@ class OmbiClient:
             logger.warning(f"TV search returned unexpected type: {type(result)}, value: {str(result)[:500]}")
             return []
     
-    def request_movie(self, movie_id: int) -> bool:
+    def request_movie(self, movie_id: int, user_override: str = None) -> bool:
         """Request a movie in Ombi.
-        
+
         Args:
             movie_id: The ID of the movie to request
-        
+            user_override: Optional username to override the default request user
+
         Returns:
             True if request was successful, False otherwise
         """
         endpoint = "/Request/movie"
         data = {"theMovieDbId": movie_id}
-        
-        # Username is passed via UserName header (set in __init__)
-        if self.request_user:
-            logger.info(f"Making request on behalf of user: {self.request_user} (via UserName header)")
+
+        # Determine which user to use
+        request_user = user_override or self.request_user
+
+        # Username is passed via UserName header
+        if request_user:
+            logger.info(f"Making request on behalf of user: {request_user} (via UserName header)")
         else:
-            logger.warning("OMBI_REQUEST_USER not set, request will be made with API key user")
-        
+            logger.warning("No request user set, request will be made with API key user")
+
         logger.debug(f"Request payload: {data}")
-        result = self._make_request('POST', endpoint, json=data)
+
+        # Use custom headers if user_override is provided
+        if user_override:
+            headers = self.headers.copy()
+            headers['UserName'] = user_override
+            result = self._make_request('POST', endpoint, json=data, headers=headers)
+        else:
+            result = self._make_request('POST', endpoint, json=data)
         return result is not None
     
-    def request_tv(self, tv_id: int) -> bool:
+    def request_tv(self, tv_id: int, user_override: str = None) -> bool:
         """Request a TV show in Ombi.
-        
+
         Args:
             tv_id: The ID of the TV show to request
-        
+            user_override: Optional username to override the default request user
+
         Returns:
             True if request was successful, False otherwise
         """
@@ -176,15 +189,25 @@ class OmbiClient:
         # Without this, Ombi may only request the first season or not create a request
         # for multi-season shows, which can cause requests to not show up in pending
         data = {"tvDbId": tv_id, "requestAll": True}
-        
-        # Username is passed via UserName header (set in __init__)
-        if self.request_user:
-            logger.info(f"Making request on behalf of user: {self.request_user} (via UserName header)")
+
+        # Determine which user to use
+        request_user = user_override or self.request_user
+
+        # Username is passed via UserName header
+        if request_user:
+            logger.info(f"Making request on behalf of user: {request_user} (via UserName header)")
         else:
-            logger.warning("OMBI_REQUEST_USER not set, request will be made with API key user")
-        
+            logger.warning("No request user set, request will be made with API key user")
+
         logger.debug(f"Request payload: {data}")
-        result = self._make_request('POST', endpoint, json=data)
+
+        # Use custom headers if user_override is provided
+        if user_override:
+            headers = self.headers.copy()
+            headers['UserName'] = user_override
+            result = self._make_request('POST', endpoint, json=data, headers=headers)
+        else:
+            result = self._make_request('POST', endpoint, json=data)
         return result is not None
     
     def get_tv_info(self, tv_id: int) -> Optional[Dict]:
