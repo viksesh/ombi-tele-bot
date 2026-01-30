@@ -210,14 +210,28 @@ class OmbiClient:
             result = self._make_request('POST', endpoint, json=data)
         return result is not None
     
+    def get_movie_info(self, movie_id: int) -> Optional[Dict]:
+        """Get detailed movie information from Ombi.
+
+        This endpoint returns more data than search results, including imdbId.
+
+        Args:
+            movie_id: The MovieDb ID of the movie
+
+        Returns:
+            Movie dictionary with detailed information, or None if error
+        """
+        endpoint = f"/Search/movie/info/{movie_id}"
+        return self._make_request('GET', endpoint)
+
     def get_tv_info(self, tv_id: int) -> Optional[Dict]:
         """Get detailed TV show information from Ombi.
-        
+
         This endpoint may have more accurate availability status than search results.
-        
+
         Args:
             tv_id: The TVDb ID of the TV show
-        
+
         Returns:
             TV show dictionary with detailed information, or None if error
         """

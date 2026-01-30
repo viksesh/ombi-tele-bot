@@ -340,19 +340,24 @@ def format_item_description(item: dict, item_type: str) -> str:
         text = f"🎬 <b>{title}</b>"
         if year:
             text += f" ({year})"
-        
-        # Add status indicator based on state
+
+        # Add IMDB link if available
+        imdb_id = item.get('imdbId') or item.get('imdbid')
+        if imdb_id:
+            text += f" 🔗 <a href=\"https://www.imdb.com/title/{imdb_id}/\">IMDB</a>"
+
+        # Add status indicator on new line
         if status == 'denied':
-            text += " ❌ <b>Not Available</b>"
+            text += "\n❌ <b>Not Available</b>"
         elif status == 'available':
-            text += " ✅ <b>Already Available</b>"
+            text += "\n✅ <b>Already Available</b>"
         elif status == 'partially_available':
-            text += " ✅ <b>Partially Available</b>"
+            text += "\n✅ <b>Partially Available</b>"
         elif status == 'approved':
-            text += " ✅ <b>Approved - Scheduled to upload when available digitally</b>"
+            text += "\n✅ <b>Approved - Scheduled to upload when available digitally</b>"
         elif status == 'requested':
-            text += " ⏳ <b>Requested - Pending approval</b>"
-        
+            text += "\n⏳ <b>Requested - Pending approval</b>"
+
         if rating and rating > 0:
             text += f"\n\n⭐ Rating: {rating:.1f}/10\n\n"
         else:
@@ -403,19 +408,24 @@ def format_item_description(item: dict, item_type: str) -> str:
         text = f"📺 <b>{title}</b>"
         if year:
             text += f" ({year})"
-        
-        # Add status indicator based on state
+
+        # Add IMDB link if available
+        imdb_id = item.get('imdbId') or item.get('imdbid')
+        if imdb_id:
+            text += f" 🔗 <a href=\"https://www.imdb.com/title/{imdb_id}/\">IMDB</a>"
+
+        # Add status indicator on new line
         if status == 'denied':
-            text += " ❌ <b>Not Available</b>"
+            text += "\n❌ <b>Not Available</b>"
         elif status == 'available':
-            text += " ✅ <b>Already Available</b>"
+            text += "\n✅ <b>Already Available</b>"
         elif status == 'partially_available':
-            text += " ✅ <b>Partially Available</b>"
+            text += "\n✅ <b>Partially Available</b>"
         elif status == 'approved':
-            text += " ✅ <b>Approved - Scheduled to upload when available digitally</b>"
+            text += "\n✅ <b>Approved - Scheduled to upload when available digitally</b>"
         elif status == 'requested':
-            text += " ⏳ <b>Requested - Pending approval</b>"
-        
+            text += "\n⏳ <b>Requested - Pending approval</b>"
+
         if rating and rating > 0:
             text += f"\n\n⭐ Rating: {rating:.1f}/10\n\n"
         else:
@@ -586,7 +596,16 @@ async def show_result(query, context: ContextTypes.DEFAULT_TYPE, item_type: str,
     if not item_id:
         await query.edit_message_text("❌ Invalid item. Please try again.")
         return
-    
+
+    # For movies, fetch detailed info to get IMDB ID (search results don't include it)
+    if item_type == 'movie' and ombi_client:
+        movie_db_id = item.get('theMovieDbId') or item.get('id')
+        if movie_db_id:
+            movie_info = ombi_client.get_movie_info(movie_db_id)
+            if movie_info and movie_info.get('imdbId'):
+                item['imdbId'] = movie_info['imdbId']
+                logger.debug(f"Fetched IMDB ID for movie: {movie_info['imdbId']}")
+
     # Format description
     description = format_item_description(item, item_type)
     
@@ -815,6 +834,11 @@ async def handle_request(query, context: ContextTypes.DEFAULT_TYPE, item_type: s
 
 async def start_from_callback(query, context: ContextTypes.DEFAULT_TYPE):
     """Show start menu from callback."""
+    # Clear search state so next message shows main menu instead of searching
+    context.user_data.pop('request_type', None)
+    context.user_data.pop('movie_results', None)
+    context.user_data.pop('tv_results', None)
+
     keyboard = [
         [InlineKeyboardButton("🎬 Request Movie", callback_data="req_movie")],
         [InlineKeyboardButton("📺 Request TV Show", callback_data="req_tv")]
@@ -1100,7 +1124,16 @@ async def show_first_result(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if not item_id:
         await update.message.reply_text("❌ Invalid item. Please try again.")
         return
-    
+
+    # For movies, fetch detailed info to get IMDB ID (search results don't include it)
+    if item_type == 'movie' and ombi_client:
+        movie_db_id = item.get('theMovieDbId') or item.get('id')
+        if movie_db_id:
+            movie_info = ombi_client.get_movie_info(movie_db_id)
+            if movie_info and movie_info.get('imdbId'):
+                item['imdbId'] = movie_info['imdbId']
+                logger.debug(f"Fetched IMDB ID for movie: {movie_info['imdbId']}")
+
     # Format description
     description = format_item_description(item, item_type)
     
