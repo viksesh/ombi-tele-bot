@@ -851,7 +851,18 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     if 'request_type' not in context.user_data:
-        # User hasn't selected movie/tv yet
+        # User hasn't selected movie/tv yet - show the start menu
+        keyboard = [
+            [InlineKeyboardButton("🎬 Request Movie", callback_data="req_movie")],
+            [InlineKeyboardButton("📺 Request TV Show", callback_data="req_tv")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "🎬 Welcome to Sparky Requests Bot!\n\n"
+            "Choose what you'd like to request:",
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
         return
     
     if not ombi_client:
