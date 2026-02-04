@@ -63,20 +63,28 @@ class OmbiClient:
                 logger.error(f"Response status: {e.response.status_code}, body: {e.response.text[:500]}")
             return None
     
-    def search_movie(self, query: str) -> List[Dict]:
+    def search_movie(self, query: str, year: int = None) -> List[Dict]:
         """Search for movies in Ombi.
-        
+
         Args:
-            query: Search query (movie name, optionally with year)
-            
+            query: Search query (movie name)
+            year: Optional year to filter results (passed to TMDB for server-side filtering)
+
         Returns:
             List of movie dictionaries with id, title, year, etc.
         """
-        # URL encode the query to handle special characters
-        encoded_query = quote(query)
-        endpoint = f"/Search/movie/{encoded_query}"
-        logger.info(f"Searching for movie: '{query}' (encoded: '{encoded_query}')")
-        result = self._make_request('GET', endpoint)
+        logger.info(f"Searching for movie: '{query}' year={year}")
+
+        # Use POST endpoint with JSON body when year is provided (supports refined search)
+        # Use GET endpoint otherwise (simpler, well-tested path)
+        if year:
+            endpoint = "/Search/movie"
+            data = {"searchTerm": query, "year": year}
+            result = self._make_request('POST', endpoint, json=data)
+        else:
+            encoded_query = quote(query)
+            endpoint = f"/Search/movie/{encoded_query}"
+            result = self._make_request('GET', endpoint)
         
         if result is None:
             logger.warning(f"Movie search returned None for query: '{query}'")
@@ -104,23 +112,23 @@ class OmbiClient:
     
     def search_tv(self, query: str) -> List[Dict]:
         """Search for TV shows in Ombi.
-        
+
         Args:
-            query: Search query (TV show name, optionally with year)
-            
+            query: Search query (TV show name)
+
         Returns:
             List of TV show dictionaries with id, title, year, etc.
         """
-        # URL encode the query to handle special characters
+        # Note: Unlike movies, Ombi's TV search API doesn't support year filtering
         encoded_query = quote(query)
         endpoint = f"/Search/tv/{encoded_query}"
         logger.info(f"Searching for TV show: '{query}' (encoded: '{encoded_query}')")
         result = self._make_request('GET', endpoint)
-        
+
         if result is None:
             logger.warning(f"TV search returned None for query: '{query}'")
             return []
-        
+
         # Ombi API returns results in different formats, handle both
         if isinstance(result, list):
             logger.info(f"TV search returned {len(result)} results (list format)")

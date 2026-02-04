@@ -73,6 +73,9 @@ nzb_client = NZBClient()
 # Auto-approve user (user with auto-approval rights in Ombi)
 OMBI_AUTO_APPROVE_USER = os.getenv('OMBI_AUTO_APPROVE_USER', 'requests-auto').strip()
 
+# List view button threshold - show "List View" button when more than this many results
+LIST_VIEW_BUTTON_THRESHOLD = int(os.getenv('LIST_VIEW_BUTTON_THRESHOLD', '5'))
+
 # Get environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 # Strip quotes if present (common when setting env vars in Docker/shell scripts)
@@ -570,6 +573,148 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_result(query, context, item_type, current_index - 1)
         return
 
+    elif data.startswith("sel_"):
+        # Select item from list view to show details (format: sel_TYPE_INDEX)
+        parts = data.split("_")
+        if len(parts) >= 3:
+            item_type = parts[1]
+            index = int(parts[2])
+            await show_result(query, context, item_type, index)
+        return
+
+    elif data.startswith("qreq_"):
+        # Quick request from list view (format: qreq_TYPE_INDEX)
+        parts = data.split("_")
+        if len(parts) >= 3:
+            item_type = parts[1]
+            index = int(parts[2])
+            await handle_quick_request(query, context, item_type, index)
+        return
+
+    elif data.startswith("listpage_"):
+        # Pagination in list view (format: listpage_TYPE_PAGE)
+        parts = data.split("_")
+        if len(parts) >= 3:
+            item_type = parts[1]
+            page = int(parts[2])
+            await show_results_list_from_callback(query, context, item_type, page)
+        return
+
+    elif data.startswith("status_"):
+        # Status button clicked (format: status_TYPE_INDEX) - just show info
+        parts = data.split("_")
+        if len(parts) >= 3:
+            item_type = parts[1]
+            index = int(parts[2])
+            results_key = f'{item_type}_results'
+            if results_key in context.user_data:
+                results = context.user_data[results_key]
+                if 0 <= index < len(results):
+                    item = results[index]
+                    should_hide, status = get_item_status(item)
+                    if status == 'available':
+                        await query.answer("✅ Already available in library!", show_alert=True)
+                    elif status == 'partially_available':
+                        await query.answer("✅ Partially available - some content in library", show_alert=True)
+                    elif status == 'approved':
+                        await query.answer("✅ Already approved - will be added when available", show_alert=True)
+                    elif status == 'requested':
+                        await query.answer("⏳ Already requested - pending approval", show_alert=True)
+                    elif status == 'denied':
+                        await query.answer("❌ Request denied", show_alert=True)
+        return
+
+    elif data.startswith("backlist_"):
+        # Back to list from detail view (format: backlist_TYPE)
+        parts = data.split("_")
+        if len(parts) >= 2:
+            item_type = parts[1]
+            page = context.user_data.get(f'{item_type}_list_page', 0)
+            await show_results_list_from_callback(query, context, item_type, page)
+        return
+
+    elif data.startswith("tolist_"):
+        # Switch to list view from detail view (format: tolist_TYPE)
+        parts = data.split("_")
+        if len(parts) >= 2:
+            item_type = parts[1]
+            # Set from_list flag so back button works correctly
+            context.user_data[f'{item_type}_from_list'] = True
+            await show_results_list_from_callback(query, context, item_type, 0)
+        return
+
+
+async def handle_quick_request(query, context: ContextTypes.DEFAULT_TYPE, item_type: str, index: int):
+    """Handle quick request from list view."""
+    results_key = f'{item_type}_results'
+    if results_key not in context.user_data:
+        await query.answer("❌ No search results found.", show_alert=True)
+        return
+
+    results = context.user_data[results_key]
+    if index < 0 or index >= len(results):
+        await query.answer("❌ Invalid selection.", show_alert=True)
+        return
+
+    item = results[index]
+    item_id = (item.get('theTvDbId') or item.get('theMovieDbId') or
+               item.get('tvDbId') or item.get('tvdbId') or
+               item.get('id') or item.get('Id') or
+               item.get('movieDbId') or item.get('seriesId'))
+
+    if not item_id:
+        await query.answer("❌ Invalid item.", show_alert=True)
+        return
+
+    # Check if already requested
+    should_hide, status = get_item_status(item)
+    if should_hide:
+        if status == 'available':
+            await query.answer("✅ Already available!", show_alert=True)
+        elif status == 'requested':
+            await query.answer("⏳ Already requested!", show_alert=True)
+        elif status == 'approved':
+            await query.answer("✅ Already approved!", show_alert=True)
+        return
+
+    # For TV shows, ensure we have season info for auto-approve check
+    if item_type == 'tv' and 'seasonRequests' not in item:
+        tv_id = (item.get('theTvDbId') or item.get('tvDbId') or item.get('tvdbId'))
+        if tv_id and ombi_client:
+            detailed_info = ombi_client.get_tv_info(tv_id)
+            if detailed_info and 'seasonRequests' in detailed_info:
+                item['seasonRequests'] = detailed_info['seasonRequests']
+
+    # Determine if we should auto-approve
+    auto_approve = False
+    auto_reason = ""
+    auto_approve, auto_reason = should_auto_approve(item, item_type)
+    if auto_approve:
+        title = item.get('title') or item.get('Title') or item.get('name') or 'Unknown'
+        logger.info(f"Auto-approving {item_type} quick request (ID: {item_id}): {auto_reason}")
+
+    # Request the item
+    user_override = OMBI_AUTO_APPROVE_USER if auto_approve else None
+
+    try:
+        if item_type == 'movie':
+            success = ombi_client.request_movie(item_id, user_override)
+        else:
+            success = ombi_client.request_tv(item_id, user_override)
+
+        if success:
+            # Update item status in results
+            item['requested'] = True
+            await query.answer("✅ Request submitted!", show_alert=True)
+            # Refresh the list view
+            page = context.user_data.get(f'{item_type}_list_page', 0)
+            await show_results_list_from_callback(query, context, item_type, page)
+        else:
+            await query.answer("❌ Failed to submit request.", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error in quick request: {e}", exc_info=True)
+        await query.answer("❌ An error occurred.", show_alert=True)
+
 
 async def show_result(query, context: ContextTypes.DEFAULT_TYPE, item_type: str, index: int):
     """Show a specific search result."""
@@ -616,25 +761,36 @@ async def show_result(query, context: ContextTypes.DEFAULT_TYPE, item_type: str,
     # Get poster URL
     poster_url = get_poster_url(item)
     
+    # Check if we came from list view
+    from_list = context.user_data.get(f'{item_type}_from_list', False)
+
     # Create navigation buttons
     keyboard = []
-    
-    # Navigation buttons
-    nav_buttons = []
-    if index > 0:
-        nav_buttons.append(InlineKeyboardButton("◀️ Previous", callback_data=f"prev_{item_type}_{index}"))
-    if index < len(results) - 1:
-        nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"next_{item_type}_{index}"))
-    if nav_buttons:
-        keyboard.append(nav_buttons)
-    
+
+    # Navigation buttons (only show if not from list view, since list has its own nav)
+    if not from_list:
+        nav_buttons = []
+        if index > 0:
+            nav_buttons.append(InlineKeyboardButton("◀️ Previous", callback_data=f"prev_{item_type}_{index}"))
+        if index < len(results) - 1:
+            nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"next_{item_type}_{index}"))
+        # Add List View button when many results and not from list
+        if len(results) > LIST_VIEW_BUTTON_THRESHOLD:
+            nav_buttons.append(InlineKeyboardButton("📋 List View", callback_data=f"tolist_{item_type}"))
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+
     # Action buttons - only show Request if not available/approved/requested
     action_buttons = []
     if not should_hide:
         action_buttons.append(InlineKeyboardButton("✅ Request", callback_data=f"request_{item_type}_{item_id}"))
+
+    # Add Back to List button if from list view, otherwise Cancel
+    if from_list:
+        action_buttons.append(InlineKeyboardButton("📋 Back to List", callback_data=f"backlist_{item_type}"))
     action_buttons.append(InlineKeyboardButton("❌ Cancel", callback_data="cancel_main"))
     keyboard.append(action_buttons)
-    
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     # Send message with poster if available
@@ -717,6 +873,25 @@ def get_item_year(item: dict, item_type: str) -> int:
         elif isinstance(year, int):
             return year
     return 0
+
+
+def get_item_rating(item: dict, item_type: str) -> float:
+    """Extract rating from an item for sorting purposes."""
+    if item_type == 'movie':
+        rating = (item.get('voteAverage') or item.get('vote_average') or
+                  item.get('rating') or item.get('Rating') or
+                  item.get('voteRating') or 0)
+    else:
+        rating = (item.get('rating') or item.get('Rating') or
+                  item.get('voteAverage') or item.get('vote_average') or
+                  item.get('siteRating') or item.get('voteRating') or 0)
+    try:
+        rating = float(rating)
+        if 0 < rating <= 1:
+            rating = rating * 10
+        return rating
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def should_auto_approve(item: dict, item_type: str) -> tuple[bool, str]:
@@ -853,6 +1028,10 @@ async def start_from_callback(query, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('request_type', None)
     context.user_data.pop('movie_results', None)
     context.user_data.pop('tv_results', None)
+    context.user_data.pop('movie_from_list', None)
+    context.user_data.pop('tv_from_list', None)
+    context.user_data.pop('movie_list_page', None)
+    context.user_data.pop('tv_list_page', None)
 
     keyboard = [
         [InlineKeyboardButton("🎬 Request Movie", callback_data="req_movie")],
@@ -914,6 +1093,7 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
     query_text = update.message.text.strip()
     
     # Extract title from IMDb URL if it's an IMDb link
+    imdb_year = None  # Year extracted from IMDB page
     if 'imdb.com' in query_text.lower():
         await update.message.reply_text("🔗 Extracting title from IMDb link...")
         try:
@@ -924,24 +1104,24 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
                     "❌ Could not extract IMDb ID from URL. Please try again."
                 )
                 return
-            
+
             imdb_id = imdb_match.group(0)
             imdb_url = f"https://www.imdb.com/title/{imdb_id}/"
-            
+
             # Fetch IMDb page
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
             response = requests.get(imdb_url, headers=headers, timeout=10)
             response.raise_for_status()
-            
+
             # Parse the page
             soup = BeautifulSoup(response.content, 'html.parser')
-            
+
             # Try to find the title in various possible locations
             title = None
             raw_title = None
-            
+
             # Method 1: Look for h1 with data-testid="hero-title-block__title"
             # This is the most reliable source for the actual title
             title_elem = soup.find('h1', {'data-testid': 'hero-title-block__title'})
@@ -956,24 +1136,30 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
                     if year_span:
                         year_span.decompose()  # Remove year span
                     raw_title = title_elem.get_text(separator=' ', strip=True)
-            
+
             # Method 2: Look for title tag and extract from it
             if not raw_title or len(raw_title) > 100:
                 title_tag = soup.find('title')
                 if title_tag:
                     raw_title = title_tag.get_text(strip=True)
-            
+
             # Method 3: Look for og:title meta tag
             if not raw_title or len(raw_title) > 100:
                 og_title = soup.find('meta', property='og:title')
                 if og_title and og_title.get('content'):
                     raw_title = og_title['content'].strip()
-            
+
             # Clean up the title - remove year, TV Series info, and other metadata
             if raw_title:
                 # Remove " - IMDb" suffix if present
                 raw_title = re.sub(r'\s*-\s*IMDb\s*$', '', raw_title, flags=re.IGNORECASE)
-                
+
+                # Extract year before removing it (for server-side TMDB filtering)
+                year_match = re.search(r'\((\d{4})\)', raw_title)
+                if year_match:
+                    imdb_year = int(year_match.group(1))
+                    logger.debug(f"Extracted year {imdb_year} from IMDb page")
+
                 # Remove year patterns like "(2025)", "(2025-)", "(TV Series 2025-)", etc.
                 # Handle both at end and in middle
                 raw_title = re.sub(r'\s*\([^)]*\d{4}[^)]*\)\s*', ' ', raw_title)
@@ -1028,30 +1214,46 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
     query_text = re.sub(r'\s*\|\s*.*$', '', query_text)  # Remove anything after |
     query_text = query_text.strip()
     
-    # Remove year from query if present (Ombi doesn't handle years well in search)
-    # But don't remove if the entire query is just a year (e.g., movie called "1942")
+    # Extract year from query for movies (Ombi TV API doesn't support year filtering)
+    # Use year from IMDB if already extracted, otherwise extract from query text
+    # But don't extract if the entire query is just a year (e.g., movie called "1942")
+    search_year = None
     year_match = re.search(r'\b(19|20)\d{2}\b', query_text)
     if year_match:
         year = year_match.group(0)
         # Check if the entire query is just the year (possibly with whitespace)
         query_without_whitespace = query_text.strip()
         if query_without_whitespace == year or query_without_whitespace == f"({year})":
-            # Entire query is just a year - don't remove it (could be a movie title like "1942")
+            # Entire query is just a year - don't extract it (could be a movie title like "1942")
             logger.debug(f"Query is just a year '{year}', keeping it as-is")
         else:
-            # Query has text + year - remove the year (handles formats like "Title 1999", "Title (1999)", "Title, 1999")
+            # Query has text + year - remove year from query text
             query_text = re.sub(r'\s*[,\s]*\(?\s*\b(19|20)\d{2}\b\s*\)?\s*', ' ', query_text).strip()
             query_text = ' '.join(query_text.split())  # Normalize whitespace
-            logger.debug(f"Removed year '{year}' from query, searching with: '{query_text}'")
+            # Only use year for filtering if searching for movies
+            if item_type == 'movie':
+                search_year = int(year)
+                logger.debug(f"Searching movie with year filter: '{query_text}' year={search_year}")
+            else:
+                logger.debug(f"Removed year from TV query: '{query_text}' (TV search doesn't support year filter)")
+    elif imdb_year and item_type == 'movie':
+        # Year was extracted from IMDB page (already removed from title)
+        search_year = imdb_year
+        logger.debug(f"Using year {search_year} from IMDB page for movie search")
     
     await update.message.reply_text(f"🔍 Searching for {item_type}: {query_text}...")
     
     try:
-        # Search Ombi (without year)
-        logger.info(f"Searching for {item_type} with query: '{query_text}'")
+        # Search Ombi (movies support year filtering, TV does not)
         if item_type == 'movie':
-            results = ombi_client.search_movie(query_text)
+            logger.info(f"Searching for movie with query: '{query_text}' year={search_year}")
+            results = ombi_client.search_movie(query_text, year=search_year)
+            # Fallback: if year search returned no results, retry without year filter
+            if not results and search_year:
+                logger.info(f"No results for '{query_text}' with year {search_year}, retrying without year filter")
+                results = ombi_client.search_movie(query_text)
         else:
+            logger.info(f"Searching for TV show with query: '{query_text}'")
             results = ombi_client.search_tv(query_text)
         
         logger.info(f"Search returned {len(results) if results else 0} results for query: '{query_text}'")
@@ -1109,10 +1311,16 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
                             logger.debug(f"Successfully fetched detailed info with TMDB ID")
                             first_item.update(detailed_info)
         
+        # Sort results by rating (highest first)
+        results.sort(key=lambda x: get_item_rating(x, item_type), reverse=True)
+        logger.debug(f"Sorted results by rating - top result: {results[0].get('title', 'Unknown')} with rating {get_item_rating(results[0], item_type)}")
+
         # Store results
         context.user_data[f'{item_type}_results'] = results
-        
-        # Show first result
+        context.user_data[f'{item_type}_from_list'] = False
+
+        # Always show detailed view first (better for mobile readability)
+        # List view is available via button when there are many results
         await show_first_result(update, context, item_type, results)
         
     except Exception as e:
@@ -1161,11 +1369,15 @@ async def show_first_result(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     # Create navigation buttons
     keyboard = []
-    
+
     # Navigation buttons (only Next if multiple results)
     if len(results) > 1:
-        keyboard.append([InlineKeyboardButton("Next ▶️", callback_data=f"next_{item_type}_0")])
-    
+        nav_buttons = [InlineKeyboardButton("Next ▶️", callback_data=f"next_{item_type}_0")]
+        # Add List View button when many results
+        if len(results) > LIST_VIEW_BUTTON_THRESHOLD:
+            nav_buttons.append(InlineKeyboardButton("📋 List View", callback_data=f"tolist_{item_type}"))
+        keyboard.append(nav_buttons)
+
     # Action buttons - only show Request if not available/approved/requested
     action_buttons = []
     if not should_hide:
@@ -1200,9 +1412,201 @@ async def show_first_result(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
 
 
+def get_item_title_for_list(item: dict, item_type: str) -> str:
+    """Get a formatted title with year and rating for list view."""
+    if item_type == 'movie':
+        title = (item.get('title') or item.get('Title') or
+                 item.get('movieTitle') or item.get('name') or 'Unknown')
+    else:
+        title = (item.get('title') or item.get('Title') or
+                 item.get('name') or item.get('Name') or
+                 item.get('seriesName') or 'Unknown')
+
+    year = get_item_year(item, item_type)
+    rating = get_item_rating(item, item_type)
+
+    year_str = f" ({year})" if year else ""
+    rating_str = f" ⭐{rating:.1f}" if rating > 0 else ""
+
+    return f"{title}{year_str}{rating_str}"
+
+
+def get_status_emoji(item: dict) -> str:
+    """Get status emoji for list view."""
+    should_hide, status = get_item_status(item)
+    if status == 'available':
+        return "✅"
+    elif status == 'partially_available':
+        return "✅"
+    elif status == 'approved':
+        return "🗓️"  # Scheduled/approved but not yet available
+    elif status == 'requested':
+        return "⏳"
+    elif status == 'denied':
+        return "❌"
+    else:
+        return "📥"  # Can be requested
+
+
+async def show_results_list(update: Update, context: ContextTypes.DEFAULT_TYPE, item_type: str, results: list, page: int = 0):
+    """Show a list view of search results with quick actions."""
+    items_per_page = 5
+    total_pages = (len(results) + items_per_page - 1) // items_per_page
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(results))
+
+    # Store list view state
+    context.user_data[f'{item_type}_from_list'] = True
+    context.user_data[f'{item_type}_list_page'] = page
+
+    # Build keyboard with title + status/request buttons
+    keyboard = []
+
+    for idx in range(start_idx, end_idx):
+        item = results[idx]
+        title_text = get_item_title_for_list(item, item_type)
+        status_emoji = get_status_emoji(item)
+
+        # Get item ID for callbacks
+        item_id = (item.get('theTvDbId') or item.get('theMovieDbId') or
+                   item.get('tvDbId') or item.get('tvdbId') or
+                   item.get('id') or item.get('Id') or
+                   item.get('movieDbId') or item.get('seriesId'))
+
+        # Title button - shows full details
+        title_btn = InlineKeyboardButton(title_text, callback_data=f"sel_{item_type}_{idx}")
+
+        # Status/Action button
+        should_hide, status = get_item_status(item)
+        if should_hide:
+            # Already available/requested - just show status
+            action_btn = InlineKeyboardButton(status_emoji, callback_data=f"status_{item_type}_{idx}")
+        else:
+            # Can request - quick request button
+            action_btn = InlineKeyboardButton(status_emoji, callback_data=f"qreq_{item_type}_{idx}")
+
+        keyboard.append([title_btn, action_btn])
+
+    # Pagination buttons
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"listpage_{item_type}_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"listpage_{item_type}_{page+1}"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    # Cancel button
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_main")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Build message text
+    type_emoji = "🎬" if item_type == 'movie' else "📺"
+    text = f"{type_emoji} <b>Found {len(results)} results</b> (page {page + 1}/{total_pages})\n\n"
+    text += "Tap a title for details, or 📥 for quick request.\n"
+    text += "✅ = Available | 🗓️ = Scheduled | ⏳ = Pending | ❌ = Denied"
+
+    await update.message.reply_text(
+        text,
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+
+
+async def show_results_list_from_callback(query, context: ContextTypes.DEFAULT_TYPE, item_type: str, page: int = 0):
+    """Show a list view of search results from a callback (e.g., back button or pagination)."""
+    results_key = f'{item_type}_results'
+    if results_key not in context.user_data:
+        await query.edit_message_text("❌ No search results found. Please start a new search.")
+        return
+
+    results = context.user_data[results_key]
+    items_per_page = 5
+    total_pages = (len(results) + items_per_page - 1) // items_per_page
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(results))
+
+    # Store list view state
+    context.user_data[f'{item_type}_from_list'] = True
+    context.user_data[f'{item_type}_list_page'] = page
+
+    # Build keyboard with title + status/request buttons
+    keyboard = []
+
+    for idx in range(start_idx, end_idx):
+        item = results[idx]
+        title_text = get_item_title_for_list(item, item_type)
+        status_emoji = get_status_emoji(item)
+
+        # Get item ID for callbacks
+        item_id = (item.get('theTvDbId') or item.get('theMovieDbId') or
+                   item.get('tvDbId') or item.get('tvdbId') or
+                   item.get('id') or item.get('Id') or
+                   item.get('movieDbId') or item.get('seriesId'))
+
+        # Title button - shows full details
+        title_btn = InlineKeyboardButton(title_text, callback_data=f"sel_{item_type}_{idx}")
+
+        # Status/Action button
+        should_hide, status = get_item_status(item)
+        if should_hide:
+            # Already available/requested - just show status
+            action_btn = InlineKeyboardButton(status_emoji, callback_data=f"status_{item_type}_{idx}")
+        else:
+            # Can request - quick request button
+            action_btn = InlineKeyboardButton(status_emoji, callback_data=f"qreq_{item_type}_{idx}")
+
+        keyboard.append([title_btn, action_btn])
+
+    # Pagination buttons
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"listpage_{item_type}_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"listpage_{item_type}_{page+1}"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    # Cancel button
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_main")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Build message text
+    type_emoji = "🎬" if item_type == 'movie' else "📺"
+    text = f"{type_emoji} <b>Found {len(results)} results</b> (page {page + 1}/{total_pages})\n\n"
+    text += "Tap a title for details, or 📥 for quick request.\n"
+    text += "✅ = Available | 🗓️ = Scheduled | ⏳ = Pending | ❌ = Denied"
+
+    try:
+        # Try to edit the current message
+        if query.message.photo:
+            # If it's a photo message, delete and send new text
+            await query.message.delete()
+            await query.message.reply_text(
+                text,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+        else:
+            await query.edit_message_text(
+                text,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+    except Exception as e:
+        logger.error(f"Error showing results list: {e}")
+        await query.message.reply_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+
+
 def main():
     """Start the bot."""
-    
+
     # Create application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
