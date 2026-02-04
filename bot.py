@@ -894,6 +894,16 @@ def get_item_rating(item: dict, item_type: str) -> float:
         return 0.0
 
 
+def get_item_popularity(item: dict, item_type: str) -> float:
+    """Extract popularity (vote count) from an item for sorting purposes."""
+    # Try vote_count first (TMDB field for popularity)
+    vote_count = (item.get('voteCount') or item.get('vote_count') or 0)
+    try:
+        return float(vote_count)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def should_auto_approve(item: dict, item_type: str) -> tuple[bool, str]:
     """Check if request should be auto-approved.
 
@@ -1311,9 +1321,9 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
                             logger.debug(f"Successfully fetched detailed info with TMDB ID")
                             first_item.update(detailed_info)
         
-        # Sort results by rating (highest first)
-        results.sort(key=lambda x: get_item_rating(x, item_type), reverse=True)
-        logger.debug(f"Sorted results by rating - top result: {results[0].get('title', 'Unknown')} with rating {get_item_rating(results[0], item_type)}")
+        # Sort results by popularity (vote count, highest first)
+        results.sort(key=lambda x: get_item_popularity(x, item_type), reverse=True)
+        logger.debug(f"Sorted results by popularity - top result: {results[0].get('title', 'Unknown')} with {get_item_popularity(results[0], item_type)} votes")
 
         # Store results
         context.user_data[f'{item_type}_results'] = results
