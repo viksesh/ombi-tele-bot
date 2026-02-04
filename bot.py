@@ -728,6 +728,13 @@ def should_auto_approve(item: dict, item_type: str) -> tuple[bool, str]:
     title = item.get('title') or item.get('Title') or item.get('name') or 'Unknown'
     logger.info(f"Checking auto-approve for {item_type}: {title}")
 
+    # For TV shows, skip auto-approve if more than 3 seasons
+    if item_type == 'tv':
+        season_requests = item.get('seasonRequests', [])
+        if isinstance(season_requests, list) and len(season_requests) > 3:
+            logger.info(f"Skipping auto-approve: TV show has {len(season_requests)} seasons (>3)")
+            return (False, "")
+
     # Check if year is current year (new releases)
     current_year = datetime.now().year
     year = get_item_year(item, item_type)
@@ -787,6 +794,14 @@ async def handle_request(query, context: ContextTypes.DEFAULT_TYPE, item_type: s
 
             if not item:
                 logger.warning(f"Could not find item with ID {item_id} in stored results")
+
+        # For TV shows, ensure we have season info for auto-approve check
+        if item and item_type == 'tv' and 'seasonRequests' not in item:
+            tv_id = (item.get('theTvDbId') or item.get('tvDbId') or item.get('tvdbId'))
+            if tv_id and ombi_client:
+                detailed_info = ombi_client.get_tv_info(tv_id)
+                if detailed_info and 'seasonRequests' in detailed_info:
+                    item['seasonRequests'] = detailed_info['seasonRequests']
 
         # Determine if we should auto-approve
         auto_approve = False
