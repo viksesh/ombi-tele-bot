@@ -4,7 +4,6 @@ import logging
 import re
 import requests
 from datetime import datetime
-from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
@@ -1116,89 +1115,30 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
                 return
 
             imdb_id = imdb_match.group(0)
-            imdb_url = f"https://www.imdb.com/title/{imdb_id}/"
 
-            # Fetch IMDb page
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.get(imdb_url, headers=headers, timeout=10)
-            response.raise_for_status()
-
-            # Parse the page
-            soup = BeautifulSoup(response.content, 'html.parser')
-
-            # Try to find the title in various possible locations
             title = None
-            raw_title = None
 
-            # Method 1: Look for h1 with data-testid="hero-title-block__title"
-            # This is the most reliable source for the actual title
-            title_elem = soup.find('h1', {'data-testid': 'hero-title-block__title'})
-            if title_elem:
-                # Get only the direct text, not from child elements
-                # IMDb often has the title as direct text, with year in a span
-                raw_title = title_elem.get_text(separator=' ', strip=True)
-                # If there are child elements, try to get just the first text node
-                if not raw_title or len(raw_title) > 100:  # If too long, might have extra data
-                    # Try to find span with year and exclude it
-                    year_span = title_elem.find('span', class_=re.compile(r'heroTitle|Year'))
-                    if year_span:
-                        year_span.decompose()  # Remove year span
-                    raw_title = title_elem.get_text(separator=' ', strip=True)
+            # Use IMDB's suggestion API to look up title by ID
+            # This is more reliable than scraping the HTML page (which returns 202 for bots)
+            suggestion_url = f"https://v3.sg.media-imdb.com/suggestion/t/{imdb_id}.json"
+            response = requests.get(suggestion_url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            }, timeout=10)
+            response.raise_for_status()
+            suggestion_data = response.json()
 
-            # Method 2: Look for title tag and extract from it
-            if not raw_title or len(raw_title) > 100:
-                title_tag = soup.find('title')
-                if title_tag:
-                    raw_title = title_tag.get_text(strip=True)
-
-            # Method 3: Look for og:title meta tag
-            if not raw_title or len(raw_title) > 100:
-                og_title = soup.find('meta', property='og:title')
-                if og_title and og_title.get('content'):
-                    raw_title = og_title['content'].strip()
-
-            # Clean up the title - remove year, TV Series info, and other metadata
-            if raw_title:
-                # Remove " - IMDb" suffix if present
-                raw_title = re.sub(r'\s*-\s*IMDb\s*$', '', raw_title, flags=re.IGNORECASE)
-
-                # Extract year before removing it (for server-side TMDB filtering)
-                year_match = re.search(r'\((\d{4})\)', raw_title)
-                if year_match:
-                    imdb_year = int(year_match.group(1))
-                    logger.debug(f"Extracted year {imdb_year} from IMDb page")
-
-                # Remove year patterns like "(2025)", "(2025-)", "(TV Series 2025-)", etc.
-                # Handle both at end and in middle
-                raw_title = re.sub(r'\s*\([^)]*\d{4}[^)]*\)\s*', ' ', raw_title)
-                raw_title = re.sub(r'\s*\(TV Series[^)]*\)\s*', ' ', raw_title, flags=re.IGNORECASE)
-                raw_title = re.sub(r'\s*\([^)]*\)\s*$', '', raw_title)  # Remove trailing parentheses
-                
-                # Remove any trailing metadata patterns (rating, genres, etc.)
-                # Remove patterns like "⭐ 8.4 | Drama, Sci-Fi" or "8.4 | Drama, Sci-Fi"
-                raw_title = re.sub(r'\s*[⭐★]\s*\d+\.\d+.*$', '', raw_title)
-                raw_title = re.sub(r'\s*\d+\.\d+\s*\|.*$', '', raw_title)  # Rating | genres
-                raw_title = re.sub(r'\s*\|\s*.*$', '', raw_title)  # Remove anything after |
-                
-                # Remove common suffixes
-                raw_title = re.sub(r'\s*\(TV Series\)\s*$', '', raw_title, flags=re.IGNORECASE)
-                raw_title = re.sub(r'\s*TV Series\s*$', '', raw_title, flags=re.IGNORECASE)
-                
-                # Clean up any remaining extra whitespace and normalize
-                title = ' '.join(raw_title.split()).strip()
-                
-                # Limit title length to reasonable size (shouldn't be more than ~50 chars typically)
-                if len(title) > 100:
-                    # If still too long, try to extract just the first part before any special chars
-                    title_match = re.match(r'^([^⭐★|(]+)', title)
-                    if title_match:
-                        title = title_match.group(1).strip()
+            for item in suggestion_data.get('d', []):
+                if item.get('id') == imdb_id:
+                    title = item.get('l')
+                    year = item.get('y')
+                    if year:
+                        imdb_year = int(year)
+                    logger.debug(f"Extracted title '{title}' year={imdb_year} from IMDB suggestion API")
+                    break
             
             if title:
                 query_text = title
-                logger.debug(f"Extracted title '{title}' from IMDb URL {imdb_url} (raw: '{raw_title}')")
+                logger.debug(f"Extracted title '{title}' for IMDb ID {imdb_id}")
             else:
                 # Fallback: use IMDb ID (might not work, but better than nothing)
                 logger.warning(f"Could not extract title from IMDb page, using ID: {imdb_id}")
