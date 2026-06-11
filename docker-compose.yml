@@ -5,14 +5,18 @@ services:
     image: viksesh/ombi-tele-bot:1.1
     container_name: ombi-tele-bot
     restart: unless-stopped
-    # No ports needed - bot uses Telegram polling
+    # Bot uses Telegram polling; the port below serves the mini app
+    # (front it with an HTTPS reverse proxy and set WEBAPP_URL to that URL).
     # Webhook is handled by AWS Lambda (see lambda/ directory)
+    ports:
+      - "${WEBAPP_PORT:-8080}:${WEBAPP_PORT:-8080}"
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - OMBI_URL=${OMBI_URL}
       - OMBI_API_KEY=${OMBI_API_KEY}
       - OMBI_REQUEST_USER=${OMBI_REQUEST_USER:-}
       - WEBAPP_URL=${WEBAPP_URL:-}
+      - WEBAPP_PORT=${WEBAPP_PORT:-8080}
       - ENABLE_GROUP_AUTH=${ENABLE_GROUP_AUTH:-}
       - AUTHORIZED_GROUP_CHAT_IDS=${AUTHORIZED_GROUP_CHAT_IDS:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}  # Set to WARNING or ERROR to reduce logs

@@ -10,6 +10,7 @@ A Telegram bot that allows users to request movies and TV shows through Ombi wit
 - 🔄 **Easy Navigation** - Scroll through multiple results with Previous/Next buttons
 - 💬 **Chat-Based** - Everything stays within Telegram chat (no external apps)
 - 🔗 **IMDb Support** - Search using IMDb links or titles
+- ✨ **Telegram Mini App** - Optional in-Telegram web UI with instant search, posters, status badges, and one-tap requests (messaging flow still fully supported)
 - 🔔 **Ombi Notifications** - Receive notifications when requests are approved/denied (via AWS Lambda webhook)
 - Dockerized for easy deployment on Ubuntu servers
 
@@ -38,6 +39,21 @@ The following environment variables are required:
   - **Single group**: `AUTHORIZED_GROUP_CHAT_ID=-1001234567890`
   - **Multiple groups**: `AUTHORIZED_GROUP_CHAT_IDS=-1001234567890,-1009876543210,-1001112223334`
   - Both environment variable names are supported for backward compatibility
+- `WEBAPP_URL` - (Optional) Public HTTPS URL of the mini app (e.g., `https://requests.yourdomain.com`). When set, the bot starts the mini app web server, shows an "✨ Open Mini App" button in the main menu, and sets the chat menu button to open the app. Telegram requires HTTPS, so front the web server with a reverse proxy. Leave unset to run messaging-only.
+- `WEBAPP_PORT` - (Optional) Port the mini app web server listens on inside the container. Default: `8080`.
+- `WEBAPP_INIT_DATA_MAX_AGE` - (Optional) Max age in seconds of Telegram WebApp auth data before it's rejected. Default: `86400` (24h).
+
+### Telegram Mini App
+
+The mini app is an optional web UI that opens inside Telegram and shares all business logic with the messaging flow (same search pipeline, IMDb link resolution, availability statuses, group authorization, and auto-approve rules).
+
+Setup:
+
+1. Set `WEBAPP_URL` to a public HTTPS URL that proxies to the bot container's `WEBAPP_PORT` (8080 by default). Any reverse proxy works (nginx, Caddy, Organizr, Cloudflare Tunnel).
+2. Restart the bot. It will serve the mini app and register the chat menu button automatically.
+3. (Optional) In [@BotFather](https://t.me/botfather), you can also configure the menu button / Main Mini App for nicer presentation.
+
+Security: every API call from the mini app is authenticated by validating Telegram's signed `initData` against the bot token (HMAC), and the same group-membership rules as the chat bot are enforced.
 
 ### Group Authorization Feature
 

@@ -1,14 +1,10 @@
 import os
-import json
 import logging
 import re
-import requests
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto,
+                      WebAppInfo, MenuButtonWebApp)
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
-from ombi_client import OmbiClient
-from nzb_client import NZBClient
 
 # Load environment variables from .env file if available
 try:
@@ -16,6 +12,20 @@ try:
     load_dotenv()
 except ImportError:
     pass  # python-dotenv not installed, use system env vars
+
+# Shared business logic (also used by the mini app in webapp_server.py)
+import media_service
+from media_service import (
+    ombi_client,
+    ImdbLookupError,
+    get_item_status,
+    get_item_year,
+    get_item_rating,
+    get_item_popularity,
+    get_poster_url,
+    should_auto_approve,
+)
+from telegram_auth import ENABLE_GROUP_AUTH, AUTHORIZED_GROUP_CHAT_IDS
 
 # Configure logging with rotation to prevent excessive storage usage
 import logging.handlers
@@ -59,19 +69,6 @@ if log_file:
 # Get logger for this module
 logger = logging.getLogger(__name__)
 
-# Initialize Ombi client
-try:
-    ombi_client = OmbiClient()
-except ValueError as e:
-    logger.error(f"Failed to initialize Ombi client: {e}")
-    ombi_client = None
-
-# Initialize NZB client for auto-approve feature
-nzb_client = NZBClient()
-
-# Auto-approve user (user with auto-approval rights in Ombi)
-OMBI_AUTO_APPROVE_USER = os.getenv('OMBI_AUTO_APPROVE_USER', 'requests-auto').strip()
-
 # List view button threshold - show "List View" button when more than this many results
 LIST_VIEW_BUTTON_THRESHOLD = int(os.getenv('LIST_VIEW_BUTTON_THRESHOLD', '5'))
 
@@ -84,11 +81,11 @@ if TELEGRAM_BOT_TOKEN:
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
 
-# Group authorization feature flag
-ENABLE_GROUP_AUTH = os.getenv('ENABLE_GROUP_AUTH', '').lower() in ('true', '1', 'yes')
-AUTHORIZED_GROUP_CHAT_IDS_STR = os.getenv('AUTHORIZED_GROUP_CHAT_ID', '').strip() or os.getenv('AUTHORIZED_GROUP_CHAT_IDS', '').strip()
-# Parse comma-separated list of group chat IDs, supporting both singular and plural env var names
-AUTHORIZED_GROUP_CHAT_IDS = [gid.strip() for gid in AUTHORIZED_GROUP_CHAT_IDS_STR.split(',') if gid.strip()] if AUTHORIZED_GROUP_CHAT_IDS_STR else []
+# Mini app URL (public HTTPS URL pointing at the webapp server, e.g. behind a
+# reverse proxy). When set, the bot shows an "Open Mini App" button and runs
+# the mini app web server alongside polling. (Group auth config is shared with
+# the mini app and lives in telegram_auth.py.)
+WEBAPP_URL = os.getenv('WEBAPP_URL', '').strip().strip('"\' ')
 
 
 def is_message_from_authorized_group(update: Update) -> bool:
@@ -218,92 +215,6 @@ async def is_user_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Unexpected error
         logger.error(f"Unexpected error checking authorization for user {user_id}: {e}", exc_info=True)
         return (False, "❌ An error occurred while checking authorization. Please try again later.")
-
-
-def get_item_status(item: dict):
-    """Check item status and return (should_hide_request, status_text).
-    
-    Returns:
-        tuple: (bool, str) - (True if request should be hidden, status message)
-        Status can be: 'available', 'partially_available', 'approved', 'requested', 'denied', or None
-    """
-    # Check if denied first (highest priority - cannot request if denied)
-    denied = item.get('denied', False) or item.get('Denied', False) or item.get('isDenied', False)
-    if denied:
-        logger.debug(f"Item is denied (denied={denied}, deniedReason={item.get('deniedReason')})")
-        return (True, 'denied')
-    
-    # Check if truly available (in library/content provider)
-    if item.get('available', False) or item.get('alreadyincp', False) or item.get('fullyAvailable', False):
-        return (True, 'available')
-    
-    # Check if partially available (some episodes/seasons available)
-    # First check the partlyAvailable field
-    partly_avail = None
-    if 'partlyAvailable' in item:
-        partly_avail = item['partlyAvailable']
-        logger.debug(f"Found partlyAvailable key with value: {partly_avail} (type: {type(partly_avail)})")
-    elif 'partiallyAvailable' in item:
-        partly_avail = item['partiallyAvailable']
-        logger.debug(f"Found partiallyAvailable key with value: {partly_avail} (type: {type(partly_avail)})")
-    elif 'partiallyavailable' in item:
-        partly_avail = item['partiallyavailable']
-        logger.debug(f"Found partiallyavailable key with value: {partly_avail} (type: {type(partly_avail)})")
-    
-    # Also check seasonRequests for TV shows - if some seasons are available, it's partially available
-    if 'seasonRequests' in item:
-        season_requests = item.get('seasonRequests', [])
-        if isinstance(season_requests, list) and len(season_requests) > 0:
-            # Check if any seasons are available
-            available_seasons = [s for s in season_requests if s.get('available', False) or s.get('fullyAvailable', False)]
-            total_seasons = len(season_requests)
-            if available_seasons and len(available_seasons) < total_seasons:
-                # Some seasons available but not all = partially available
-                logger.debug(f"Found {len(available_seasons)}/{total_seasons} seasons available - marking as partially available")
-                return (True, 'partially_available')
-    
-    # Check if value is truthy (not None, not False, not empty string)
-    if partly_avail is not None:
-        # If it's explicitly False, don't treat as partially available
-        if partly_avail is False:
-            logger.debug("partlyAvailable is False - not partially available")
-        # If it's an empty string or falsy string, don't treat as partially available
-        elif isinstance(partly_avail, str) and partly_avail.strip().lower() in ('false', '0', 'no', ''):
-            logger.debug(f"partlyAvailable is falsy string '{partly_avail}' - not partially available")
-        # Any other truthy value means partially available (True, 1, "true", non-empty string, etc.)
-        else:
-            logger.debug(f"Item is partially available (partlyAvailable={partly_avail}, truthy={bool(partly_avail)})")
-            return (True, 'partially_available')
-    
-    # Check if approved (scheduled to upload when available digitally)
-    # Check multiple possible field names and values
-    approved = item.get('approved', False) or item.get('Approved', False) or item.get('isApproved', False)
-    request_id = item.get('requestId')
-    
-    # If there's a requestId, it might be approved
-    # Also check if approved is explicitly True
-    if request_id:
-        logger.debug(f"Item has requestId={request_id}, approved={approved}")
-        # If approved is True, definitely approved
-        if approved:
-            logger.debug("Item is approved (approved=True)")
-            return (True, 'approved')
-        # If there's a requestId but approved is False, it might still be pending approval
-        # But we'll treat it as requested, not approved
-    
-    if approved:
-        logger.debug(f"Item is approved (approved={approved})")
-        return (True, 'approved')
-    
-    # Check if requested (pending approval)
-    # requestId: 0 or null means no request exists, any positive number means a request exists
-    has_request = request_id and request_id != 0 and request_id != '0'
-    if item.get('requested', False) or has_request:
-        logger.debug(f"Item is requested (requested={item.get('requested')}, requestId={request_id}, has_request={has_request})")
-        return (True, 'requested')
-    
-    # Not available, approved, or requested - can be requested
-    return (False, None)
 
 
 def format_item_description(item: dict, item_type: str) -> str:
@@ -438,27 +349,19 @@ def format_item_description(item: dict, item_type: str) -> str:
         return text
 
 
-def get_poster_url(item: dict, base_url: str = "https://image.tmdb.org/t/p/w500") -> str:
-    """Get poster URL for item."""
-    # Try multiple possible field names for poster path
-    # Ombi TV shows use 'banner' for poster images
-    poster_path = (item.get('banner') or item.get('Banner') or  # TV shows often use banner
-                   item.get('posterPath') or item.get('poster_path') or 
-                   item.get('backdropPath') or item.get('backdrop_path') or
-                   item.get('poster') or item.get('Poster') or 
-                   item.get('posterUrl') or item.get('poster_url') or
-                   item.get('image') or item.get('Image'))
-    
-    if poster_path:
-        # If it's already a full URL, return it
-        if poster_path.startswith('http://') or poster_path.startswith('https://'):
-            return poster_path
-        # If it starts with /, prepend base URL
-        if poster_path.startswith('/'):
-            return f"{base_url}{poster_path}"
-        # Otherwise, assume it's a relative path
-        return f"{base_url}/{poster_path.lstrip('/')}"
-    return None
+def main_menu_markup(chat=None) -> InlineKeyboardMarkup:
+    """Build the main menu keyboard, including the mini app button when configured.
+
+    Telegram only allows web_app inline buttons in private chats, so the mini
+    app button is omitted for group chats.
+    """
+    keyboard = [
+        [InlineKeyboardButton("🎬 Request Movie", callback_data="req_movie")],
+        [InlineKeyboardButton("📺 Request TV Show", callback_data="req_tv")]
+    ]
+    if WEBAPP_URL and (chat is None or chat.type == 'private'):
+        keyboard.append([InlineKeyboardButton("✨ Open Mini App", web_app=WebAppInfo(url=WEBAPP_URL))])
+    return InlineKeyboardMarkup(keyboard)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -466,19 +369,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Ignore messages from authorized group chats
     if is_message_from_authorized_group(update):
         return
-    
+
     # Check authorization
     is_authorized, error_msg = await is_user_authorized(update, context)
     if not is_authorized:
         await update.message.reply_text(error_msg, parse_mode='HTML')
         return
-    
-    keyboard = [
-        [InlineKeyboardButton("🎬 Request Movie", callback_data="req_movie")],
-        [InlineKeyboardButton("📺 Request TV Show", callback_data="req_tv")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
+    reply_markup = main_menu_markup(update.effective_chat)
+
     await update.message.reply_text(
         "🎬 <b>Welcome to Sparky Requests Bot!</b>\n\n"
         "Choose what you'd like to request:",
@@ -676,40 +575,11 @@ async def handle_quick_request(query, context: ContextTypes.DEFAULT_TYPE, item_t
             await query.answer("✅ Already approved!", show_alert=True)
         return
 
-    # For TV shows, ensure we have season info for auto-approve check
-    if item_type == 'tv' and not item.get('seasonRequests'):
-        tv_id = (item.get('theTvDbId') or item.get('tvDbId') or item.get('tvdbId') or
-                 item.get('theMovieDbId') or item.get('id'))
-        if tv_id and ombi_client:
-            detailed_info = ombi_client.get_tv_info(tv_id)
-            if detailed_info and detailed_info.get('seasonRequests'):
-                item['seasonRequests'] = detailed_info['seasonRequests']
-                logger.info(f"Fetched season info: {len(detailed_info['seasonRequests'])} seasons")
-            else:
-                logger.warning(f"Could not fetch season info for TV show (tv_id: {tv_id})")
-        else:
-            logger.warning(f"Cannot fetch season info: tv_id={tv_id}, ombi_client={'available' if ombi_client else 'None'}")
-
-    # Determine if we should auto-approve
-    auto_approve = False
-    auto_reason = ""
-    auto_approve, auto_reason = should_auto_approve(item, item_type)
-    if auto_approve:
-        title = item.get('title') or item.get('Title') or item.get('name') or 'Unknown'
-        logger.info(f"Auto-approving {item_type} quick request (ID: {item_id}): {auto_reason}")
-
-    # Request the item
-    user_override = OMBI_AUTO_APPROVE_USER if auto_approve else None
-
     try:
-        if item_type == 'movie':
-            success = ombi_client.request_movie(item_id, user_override)
-        else:
-            success = ombi_client.request_tv(item_id, user_override)
+        # Shared request pipeline (season fetch, auto-approve checks, submit)
+        success, auto_approved = media_service.submit_request(item_type, item_id, item)
 
         if success:
-            # Update item status in results
-            item['requested'] = True
             await query.answer("✅ Request submitted!", show_alert=True)
             # Refresh the list view
             page = context.user_data.get(f'{item_type}_list_page', 0)
@@ -748,13 +618,8 @@ async def show_result(query, context: ContextTypes.DEFAULT_TYPE, item_type: str,
         return
 
     # For movies, fetch detailed info to get IMDB ID (search results don't include it)
-    if item_type == 'movie' and ombi_client:
-        movie_db_id = item.get('theMovieDbId') or item.get('id')
-        if movie_db_id:
-            movie_info = ombi_client.get_movie_info(movie_db_id)
-            if movie_info and movie_info.get('imdbId'):
-                item['imdbId'] = movie_info['imdbId']
-                logger.debug(f"Fetched IMDB ID for movie: {movie_info['imdbId']}")
+    if item_type == 'movie':
+        media_service.enrich_movie_imdb(item)
 
     # Format description
     description = format_item_description(item, item_type)
@@ -858,109 +723,6 @@ async def show_result(query, context: ContextTypes.DEFAULT_TYPE, item_type: str,
             )
 
 
-def get_item_year(item: dict, item_type: str) -> int:
-    """Extract the year from an item."""
-    if item_type == 'movie':
-        year = (item.get('releaseDate') or item.get('release_date') or
-                item.get('year') or item.get('Year') or
-                item.get('releaseYear'))
-    else:
-        year = (item.get('firstAired') or item.get('firstAirDate') or
-                item.get('first_air_date') or item.get('year') or
-                item.get('Year') or item.get('releaseYear') or
-                item.get('firstAirYear'))
-
-    if year:
-        if isinstance(year, str) and len(year) >= 4:
-            year_match = re.search(r'(\d{4})', str(year))
-            if year_match:
-                return int(year_match.group(1))
-        elif isinstance(year, int):
-            return year
-    return 0
-
-
-def get_item_rating(item: dict, item_type: str) -> float:
-    """Extract rating from an item for sorting purposes."""
-    if item_type == 'movie':
-        rating = (item.get('voteAverage') or item.get('vote_average') or
-                  item.get('rating') or item.get('Rating') or
-                  item.get('voteRating') or 0)
-    else:
-        rating = (item.get('rating') or item.get('Rating') or
-                  item.get('voteAverage') or item.get('vote_average') or
-                  item.get('siteRating') or item.get('voteRating') or 0)
-    try:
-        rating = float(rating)
-        if 0 < rating <= 1:
-            rating = rating * 10
-        return rating
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def get_item_popularity(item: dict, item_type: str) -> float:
-    """Extract popularity (vote count) from an item for sorting purposes."""
-    # Try vote_count first (TMDB field for popularity)
-    vote_count = (item.get('voteCount') or item.get('vote_count') or 0)
-    try:
-        return float(vote_count)
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def should_auto_approve(item: dict, item_type: str) -> tuple[bool, str]:
-    """Check if request should be auto-approved.
-
-    Returns:
-        tuple: (should_auto_approve, reason)
-    """
-    title = item.get('title') or item.get('Title') or item.get('name') or 'Unknown'
-    logger.info(f"Checking auto-approve for {item_type}: {title}")
-
-    # For TV shows, skip auto-approve if more than 3 seasons or if season count is unknown
-    if item_type == 'tv':
-        season_requests = item.get('seasonRequests')
-        if not isinstance(season_requests, list) or len(season_requests) == 0:
-            logger.info(f"Skipping auto-approve: TV show season count unknown (seasonRequests missing or empty)")
-            return (False, "")
-        if len(season_requests) > 3:
-            logger.info(f"Skipping auto-approve: TV show has {len(season_requests)} seasons (>3)")
-            return (False, "")
-
-    # Check if year is current year (new releases)
-    current_year = datetime.now().year
-    year = get_item_year(item, item_type)
-    logger.debug(f"Item year: {year}, current year: {current_year}")
-    if year == current_year:
-        logger.info(f"Auto-approve triggered: year is {current_year}")
-        return (True, f"year is {current_year}")
-
-    # Check if item exists in NZB
-    if not nzb_client.enabled:
-        logger.debug("NZB client not enabled, skipping NZB check")
-        return (False, "")
-
-    # Get title for search
-    if item_type == 'movie':
-        title = (item.get('title') or item.get('Title') or
-                 item.get('movieTitle') or item.get('name') or '')
-        imdb_id = item.get('imdbId') or item.get('imdbid')
-        if nzb_client.search_movie(title, imdb_id):
-            return (True, "found in NZB")
-    else:
-        title = (item.get('title') or item.get('Title') or
-                 item.get('name') or item.get('Name') or
-                 item.get('seriesName') or '')
-        # Use tvdbId for more deterministic search
-        tvdb_id = (item.get('theTvDbId') or item.get('tvDbId') or
-                   item.get('tvdbId'))
-        if nzb_client.search_tv(title, tvdb_id):
-            return (True, "found in NZB")
-
-    return (False, "")
-
-
 async def handle_request(query, context: ContextTypes.DEFAULT_TYPE, item_type: str, item_id: int):
     """Handle request for an item."""
     if not ombi_client:
@@ -988,36 +750,8 @@ async def handle_request(query, context: ContextTypes.DEFAULT_TYPE, item_type: s
             if not item:
                 logger.warning(f"Could not find item with ID {item_id} in stored results")
 
-        # For TV shows, ensure we have season info for auto-approve check
-        if item and item_type == 'tv' and not item.get('seasonRequests'):
-            tv_id = (item.get('theTvDbId') or item.get('tvDbId') or item.get('tvdbId') or
-                     item.get('theMovieDbId') or item.get('id'))
-            if tv_id and ombi_client:
-                detailed_info = ombi_client.get_tv_info(tv_id)
-                if detailed_info and detailed_info.get('seasonRequests'):
-                    item['seasonRequests'] = detailed_info['seasonRequests']
-                    logger.info(f"Fetched season info: {len(detailed_info['seasonRequests'])} seasons")
-                else:
-                    logger.warning(f"Could not fetch season info for TV show (tv_id: {tv_id})")
-            else:
-                logger.warning(f"Cannot fetch season info: tv_id={tv_id}, ombi_client={'available' if ombi_client else 'None'}")
-
-        # Determine if we should auto-approve
-        auto_approve = False
-        auto_reason = ""
-        if item:
-            auto_approve, auto_reason = should_auto_approve(item, item_type)
-            if auto_approve:
-                logger.info(f"Auto-approving {item_type} request (ID: {item_id}): {auto_reason}")
-
-        # Request the item with appropriate user
-        success = False
-        user_override = OMBI_AUTO_APPROVE_USER if auto_approve else None
-
-        if item_type == 'movie':
-            success = ombi_client.request_movie(item_id, user_override)
-        else:
-            success = ombi_client.request_tv(item_id, user_override)
+        # Shared request pipeline (season fetch, auto-approve checks, submit)
+        success, auto_approved = media_service.submit_request(item_type, item_id, item)
 
         if success:
             await query.answer("✅ Request submitted successfully!", show_alert=True)
@@ -1057,12 +791,8 @@ async def start_from_callback(query, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('movie_list_page', None)
     context.user_data.pop('tv_list_page', None)
 
-    keyboard = [
-        [InlineKeyboardButton("🎬 Request Movie", callback_data="req_movie")],
-        [InlineKeyboardButton("📺 Request TV Show", callback_data="req_tv")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
+    reply_markup = main_menu_markup(query.message.chat if query.message else None)
+
     try:
         await query.edit_message_text(
             "🎬 <b>Welcome to Sparky Requests Bot!</b>\n\n"
@@ -1094,11 +824,7 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
     
     if 'request_type' not in context.user_data:
         # User hasn't selected movie/tv yet - show the start menu
-        keyboard = [
-            [InlineKeyboardButton("🎬 Request Movie", callback_data="req_movie")],
-            [InlineKeyboardButton("📺 Request TV Show", callback_data="req_tv")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        reply_markup = main_menu_markup(update.effective_chat)
         await update.message.reply_text(
             "🎬 Welcome to Sparky Requests Bot!\n\n"
             "Choose what you'd like to request:",
@@ -1121,110 +847,27 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
     if 'imdb.com' in query_text.lower():
         await update.message.reply_text("🔗 Extracting title from IMDb link...")
         try:
-            # Extract IMDb ID from URL
-            imdb_match = re.search(r'tt\d+', query_text)
-            if not imdb_match:
-                await update.message.reply_text(
-                    "❌ Could not extract IMDb ID from URL. Please try again."
-                )
-                return
-
-            imdb_id = imdb_match.group(0)
-
-            title = None
-
-            # Use IMDB's suggestion API to look up title by ID
-            # This is more reliable than scraping the HTML page (which returns 202 for bots)
-            suggestion_url = f"https://v3.sg.media-imdb.com/suggestion/t/{imdb_id}.json"
-            response = requests.get(suggestion_url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            }, timeout=10)
-            response.raise_for_status()
-            suggestion_data = response.json()
-
-            for item in suggestion_data.get('d', []):
-                if item.get('id') == imdb_id:
-                    title = item.get('l')
-                    year = item.get('y')
-                    if year:
-                        imdb_year = int(year)
-                    logger.debug(f"Extracted title '{title}' year={imdb_year} from IMDB suggestion API")
-                    break
-            
-            if title:
-                query_text = title
-                logger.debug(f"Extracted title '{title}' for IMDb ID {imdb_id}")
-            else:
-                # Fallback: use IMDb ID (might not work, but better than nothing)
-                logger.warning(f"Could not extract title from IMDb page, using ID: {imdb_id}")
-                query_text = imdb_id
-                
-        except requests.RequestException as e:
-            logger.error(f"Error fetching IMDb page: {e}")
-            await update.message.reply_text(
-                "❌ Could not fetch IMDb page. Please try searching with the title directly."
-            )
+            query_text, imdb_year = media_service.resolve_imdb_link(query_text)
+        except ImdbLookupError as e:
+            await update.message.reply_text(f"❌ {e}")
             return
         except Exception as e:
-            logger.error(f"Error parsing IMDb page: {e}", exc_info=True)
+            logger.error(f"Error resolving IMDb link: {e}", exc_info=True)
             await update.message.reply_text(
                 "❌ Could not extract title from IMDb link. Please try searching with the title directly."
             )
             return
-    
-    # Clean up query text - remove any extra whitespace and ensure it's just the title
-    query_text = query_text.strip()
-    # Remove any trailing metadata that might have been included
-    query_text = re.sub(r'\s*[⭐★]\s*\d+\.\d+.*$', '', query_text)  # Remove rating and after
-    query_text = re.sub(r'\s*\|\s*.*$', '', query_text)  # Remove anything after |
-    query_text = query_text.strip()
-    
-    # Extract year from query for movies (Ombi TV API doesn't support year filtering)
-    # Use year from IMDB if already extracted, otherwise extract from query text
-    # But don't extract if the entire query is just a year (e.g., movie called "1942")
-    search_year = None
-    year_match = re.search(r'\b(19|20)\d{2}\b', query_text)
-    if year_match:
-        year = year_match.group(0)
-        # Check if the entire query is just the year (possibly with whitespace)
-        query_without_whitespace = query_text.strip()
-        if query_without_whitespace == year or query_without_whitespace == f"({year})":
-            # Entire query is just a year - don't extract it (could be a movie title like "1942")
-            logger.debug(f"Query is just a year '{year}', keeping it as-is")
-        else:
-            # Query has text + year - remove year from query text
-            query_text = re.sub(r'\s*[,\s]*\(?\s*\b(19|20)\d{2}\b\s*\)?\s*', ' ', query_text).strip()
-            query_text = ' '.join(query_text.split())  # Normalize whitespace
-            # Only use year for filtering if searching for movies
-            if item_type == 'movie':
-                search_year = int(year)
-                logger.debug(f"Searching movie with year filter: '{query_text}' year={search_year}")
-            else:
-                logger.debug(f"Removed year from TV query: '{query_text}' (TV search doesn't support year filter)")
-    elif imdb_year and item_type == 'movie':
-        # Year was extracted from IMDB page (already removed from title)
-        search_year = imdb_year
-        logger.debug(f"Using year {search_year} from IMDB page for movie search")
-    
+
+    # Clean up the query and extract an optional year filter (movies only)
+    query_text = media_service.clean_query_text(query_text)
+    query_text, search_year = media_service.extract_search_year(query_text, item_type, imdb_year)
+
     await update.message.reply_text(f"🔍 Searching for {item_type}: {query_text}...")
     
     try:
-        # Search Ombi (movies support year filtering, TV does not)
-        if item_type == 'movie':
-            logger.info(f"Searching for movie with query: '{query_text}' year={search_year}")
-            results = ombi_client.search_movie(query_text, year=search_year)
-            # Fallback: if year search returned no results, retry without year filter
-            if not results and search_year:
-                logger.info(f"No results for '{query_text}' with year {search_year}, retrying without year filter")
-                results = ombi_client.search_movie(query_text)
-        else:
-            logger.info(f"Searching for TV show with query: '{query_text}'")
-            results = ombi_client.search_tv(query_text)
-        
-        logger.info(f"Search returned {len(results) if results else 0} results for query: '{query_text}'")
-        if results:
-            logger.debug(f"First result keys: {list(results[0].keys()) if results else 'N/A'}")
-        
+        # Shared search pipeline (year fallback, TV detail enrichment, popularity sort)
+        results = media_service.perform_search(item_type, query_text, search_year)
+
         if not results:
             logger.warning(f"No results found for {item_type} query: '{query_text}'")
             await update.message.reply_text(
@@ -1235,50 +878,6 @@ async def handle_search_message(update: Update, context: ContextTypes.DEFAULT_TY
                 ]])
             )
             return
-        
-        # For TV shows, try to get detailed info which may have more accurate availability status
-        if item_type == 'tv' and results:
-            # Try to get detailed info for the first result to get accurate availability
-            first_item = results[0]
-            # Try multiple ID fields - Ombi might use TMDB ID for the info endpoint
-            tv_id = (first_item.get('theTvDbId') or first_item.get('tvDbId') or 
-                    first_item.get('tvdbId') or first_item.get('theMovieDbId') or  # Try TMDB ID as fallback
-                    first_item.get('seriesId'))
-            
-            if tv_id:
-                logger.debug(f"Fetching detailed TV info for ID: {tv_id} (theTvDbId={first_item.get('theTvDbId')}, theMovieDbId={first_item.get('theMovieDbId')}, seriesId={first_item.get('seriesId')})")
-                detailed_info = ombi_client.get_tv_info(tv_id)
-                if detailed_info:
-                    # Check seasonRequests in detailed info - might have availability per season
-                    if 'seasonRequests' in detailed_info:
-                        season_requests = detailed_info.get('seasonRequests', [])
-                        # Check if any seasons are available (partial availability)
-                        if isinstance(season_requests, list) and len(season_requests) > 0:
-                            available_seasons = [s for s in season_requests if s.get('available', False) or s.get('fullyAvailable', False)]
-                            total_seasons = len(season_requests)
-                            if available_seasons and len(available_seasons) < total_seasons:
-                                logger.debug(f"Found {len(available_seasons)}/{total_seasons} seasons available - marking as partially available")
-                                # Force partlyAvailable to True if we find some (but not all) seasons available
-                                detailed_info['partlyAvailable'] = True
-                    # Also check if detailed info has different partlyAvailable value
-                    if detailed_info.get('partlyAvailable') is True:
-                        logger.debug("Detailed info shows partlyAvailable=True")
-                    # Merge detailed info into first result to get accurate availability status
-                    first_item.update(detailed_info)
-                    logger.debug(f"After merge - partlyAvailable: {first_item.get('partlyAvailable')}, fullyAvailable: {first_item.get('fullyAvailable')}, available: {first_item.get('available')}, approved: {first_item.get('approved')}, requestId: {first_item.get('requestId')}")
-                else:
-                    logger.warning(f"Failed to fetch detailed info for TV ID {tv_id} - trying alternative endpoint or ID")
-                    # Try with TMDB ID if we used TVDb ID
-                    if tv_id != first_item.get('theMovieDbId') and first_item.get('theMovieDbId'):
-                        logger.debug(f"Retrying with TMDB ID: {first_item.get('theMovieDbId')}")
-                        detailed_info = ombi_client.get_tv_info(first_item.get('theMovieDbId'))
-                        if detailed_info:
-                            logger.debug(f"Successfully fetched detailed info with TMDB ID")
-                            first_item.update(detailed_info)
-        
-        # Sort results by popularity (vote count, highest first)
-        results.sort(key=lambda x: get_item_popularity(x, item_type), reverse=True)
-        logger.debug(f"Sorted results by popularity - top result: {results[0].get('title', 'Unknown')} with {get_item_popularity(results[0], item_type)} votes")
 
         # Store results
         context.user_data[f'{item_type}_results'] = results
@@ -1314,13 +913,8 @@ async def show_first_result(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
 
     # For movies, fetch detailed info to get IMDB ID (search results don't include it)
-    if item_type == 'movie' and ombi_client:
-        movie_db_id = item.get('theMovieDbId') or item.get('id')
-        if movie_db_id:
-            movie_info = ombi_client.get_movie_info(movie_db_id)
-            if movie_info and movie_info.get('imdbId'):
-                item['imdbId'] = movie_info['imdbId']
-                logger.debug(f"Fetched IMDB ID for movie: {movie_info['imdbId']}")
+    if item_type == 'movie':
+        media_service.enrich_movie_imdb(item)
 
     # Format description
     description = format_item_description(item, item_type)
@@ -1569,12 +1163,48 @@ async def show_results_list_from_callback(query, context: ContextTypes.DEFAULT_T
         )
 
 
+async def post_init(application: Application) -> None:
+    """Start the mini app server and set the chat menu button (when configured)."""
+    if not WEBAPP_URL:
+        logger.info("WEBAPP_URL not set - mini app disabled, messaging only")
+        return
+
+    # Run the mini app server on the bot's event loop (no separate process)
+    try:
+        from webapp_server import start_webapp_server
+        application.bot_data['webapp_runner'] = await start_webapp_server(TELEGRAM_BOT_TOKEN)
+    except Exception as e:
+        logger.error(f"Failed to start mini app server: {e}", exc_info=True)
+
+    # Show the mini app in the chat menu button (next to the message box)
+    try:
+        await application.bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(text="Request", web_app=WebAppInfo(url=WEBAPP_URL))
+        )
+        logger.info("Chat menu button set to open the mini app")
+    except TelegramError as e:
+        logger.warning(f"Could not set chat menu button: {e}")
+
+
+async def post_shutdown(application: Application) -> None:
+    """Stop the mini app server on shutdown."""
+    runner = application.bot_data.get('webapp_runner')
+    if runner:
+        await runner.cleanup()
+
+
 def main():
     """Start the bot."""
 
     # Create application
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(handle_callback))
