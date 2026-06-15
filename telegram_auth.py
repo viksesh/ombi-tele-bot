@@ -60,9 +60,10 @@ def validate_init_data(init_data: str, bot_token: str) -> dict | None:
             logger.warning("initData missing hash")
             return None
 
-        # signature is used for third-party validation; not part of the hash check
-        params.pop('signature', None)
-
+        # The data-check-string is every received field except `hash`, sorted and
+        # joined by newlines. Newer Telegram clients also send a `signature` field
+        # (for third-party Ed25519 validation) — it IS part of the hash check, so
+        # it must stay in the string. Stripping it causes a hash mismatch.
         data_check_string = '\n'.join(f"{k}={v}" for k, v in sorted(params.items()))
         secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
         computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
