@@ -539,6 +539,26 @@ def enrich_movie_imdb(item: dict) -> None:
             logger.debug(f"Fetched IMDB ID for movie: {movie_info['imdbId']}")
 
 
+def enrich_item_imdb(item: dict, item_type: str) -> None:
+    """Attach the IMDB ID to a movie or TV item (no-op if already present).
+
+    Search results don't include IMDB IDs; only the detail endpoints do. Safe to
+    call on every result (it short-circuits when the ID is already known).
+    """
+    if not ombi_client or item.get('imdbId') or item.get('imdbid'):
+        return
+    if item_type == 'movie':
+        enrich_movie_imdb(item)
+        return
+    tv_id = (item.get('theTvDbId') or item.get('tvDbId') or item.get('tvdbId') or
+             item.get('theMovieDbId') or item.get('id'))
+    if tv_id:
+        info = ombi_client.get_tv_info(tv_id)
+        if info and info.get('imdbId'):
+            item['imdbId'] = info['imdbId']
+            logger.debug(f"Fetched IMDB ID for TV show: {info['imdbId']}")
+
+
 def normalize_item(item: dict, item_type: str) -> dict:
     """Convert a raw Ombi item into the JSON shape the mini app consumes."""
     should_hide, status = get_item_status(item)

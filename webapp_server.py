@@ -99,10 +99,29 @@ async def handle_search(request: web.Request) -> web.Response:
     session = _get_session(user_id)
     session[item_type] = results
 
+    # Enrich IMDB IDs up front so links show immediately (search results omit
+    # them — only the detail endpoints have them). Done concurrently with a
+    # small cap so we don't fire dozens of simultaneous calls at Ombi.
+    await _enrich_imdb_ids(results, item_type)
+
     normalized = [media_service.normalize_item(item, item_type) for item in results]
     # Drop items with no usable ID - they can't be requested or detailed
     normalized = [n for n in normalized if n['id']]
     return web.json_response({'ok': True, 'results': normalized})
+
+
+async def _enrich_imdb_ids(results: list, item_type: str, concurrency: int = 8) -> None:
+    """Concurrently attach IMDB IDs to results, capping simultaneous Ombi calls."""
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(item):
+        async with sem:
+            try:
+                await asyncio.to_thread(media_service.enrich_item_imdb, item, item_type)
+            except Exception as e:
+                logger.debug(f"IMDB enrichment failed for an item: {e}")
+
+    await asyncio.gather(*(_one(item) for item in results))
 
 
 def _find_session_item(user_id: int, item_type: str, item_id) -> dict | None:
