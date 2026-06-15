@@ -31,8 +31,14 @@ echo "   1. docker login"
 echo "   2. docker push ${IMAGE_NAME}:${VERSION}"
 echo "   3. docker push ${IMAGE_NAME}:latest"
 echo ""
-read -p "Do you want to publish to Docker Hub now? (y/n) " -n 1 -r
-echo
+# In CI (or any non-interactive run), set PUBLISH=1 to push without prompting.
+# Local runs still get the interactive confirmation.
+if [[ "${PUBLISH:-}" =~ ^(1|true|yes|y|Y)$ ]]; then
+    REPLY="y"
+else
+    read -p "Do you want to publish to Docker Hub now? (y/n) " -n 1 -r
+    echo
+fi
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo ""
     echo "Publishing ${IMAGE_NAME}:${VERSION}..."

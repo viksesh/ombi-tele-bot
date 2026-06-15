@@ -1,0 +1,38 @@
+name: Publish Docker image
+
+# Build and push the image to Docker Hub on every push to main, reusing the
+# repo's build-and-publish.sh. The image is tagged with the contents of the
+# VERSION file plus `latest`. Bump VERSION when you want a new version number.
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'        # docs-only changes don't need a rebuild
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from VERSION file
+        id: version
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and publish via build-and-publish.sh
+        env:
+          PUBLISH: "1"   # tells the script to push without the interactive prompt
+        run: |
+          chmod +x build-and-publish.sh
+          ./build-and-publish.sh "${{ steps.version.outputs.version }}"
+
+      - name: Summary
+        run: |
+          echo "Published viksesh/ombi-tele-bot:${{ steps.version.outputs.version }} and :latest" >> "$GITHUB_STEP_SUMMARY"
