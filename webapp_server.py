@@ -189,8 +189,35 @@ async def handle_details(request: web.Request) -> web.Response:
     return web.json_response({'ok': True, 'item': media_service.normalize_item(enriched, item_type)})
 
 
+def _build_index_html() -> str:
+    """Read the frontend files and inline CSS/JS into a single self-contained page.
+
+    Serving one document with no /static sub-requests avoids tunnel quirks
+    (e.g. ngrok's free-tier interstitial serving warning pages for CSS/JS) and
+    keeps the mini app to a single request. Source files stay separate on disk.
+    """
+    with open(os.path.join(WEBAPP_DIR, 'index.html'), encoding='utf-8') as f:
+        html = f.read()
+    with open(os.path.join(WEBAPP_DIR, 'style.css'), encoding='utf-8') as f:
+        css = f.read()
+    with open(os.path.join(WEBAPP_DIR, 'app.js'), encoding='utf-8') as f:
+        js = f.read()
+
+    html = html.replace(
+        '<link rel="stylesheet" href="/static/style.css">',
+        f'<style>\n{css}\n</style>',
+    )
+    html = html.replace(
+        '<script src="/static/app.js"></script>',
+        f'<script>\n{js}\n</script>',
+    )
+    return html
+
+
 async def handle_index(request: web.Request) -> web.Response:
-    return web.FileResponse(os.path.join(WEBAPP_DIR, 'index.html'))
+    # Rebuilt per request so edits show up on refresh during local testing;
+    # the files are tiny so the cost is negligible.
+    return web.Response(text=_build_index_html(), content_type='text/html')
 
 
 def create_app(bot_token: str) -> web.Application:
