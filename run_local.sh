@@ -19,8 +19,10 @@ if [ ! -f .env ]; then
 fi
 
 
-# Load environment variables
-export $(cat .env | grep -v '^#' | xargs)
+# Load environment variables (handles inline comments and values with spaces)
+set -a
+source .env
+set +a
 
 # Check required variables
 if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
@@ -40,6 +42,26 @@ fi
 
 
 echo "✅ Environment variables loaded"
+echo ""
+
+# Stop any leftover bot instances from a previous run. Stale processes keep
+# polling Telegram (causing getUpdates conflicts) and, more importantly, hold
+# the mini app port (WEBAPP_PORT) so the new instance hangs on startup while
+# binding it.
+STALE_BOTS=$(pgrep -f "python.*bot.py")
+if [ -n "$STALE_BOTS" ]; then
+    echo "🧹 Stopping leftover bot processes: $STALE_BOTS"
+    kill -9 $STALE_BOTS 2>/dev/null
+fi
+
+# Free the mini app port if something else is holding it.
+if [ -n "$WEBAPP_PORT" ]; then
+    PORT_PID=$(lsof -nP -tiTCP:"$WEBAPP_PORT" -sTCP:LISTEN 2>/dev/null)
+    if [ -n "$PORT_PID" ]; then
+        echo "🧹 Freeing port $WEBAPP_PORT (held by PID $PORT_PID)"
+        kill -9 $PORT_PID 2>/dev/null
+    fi
+fi
 echo ""
 
 # Check if virtual environment exists

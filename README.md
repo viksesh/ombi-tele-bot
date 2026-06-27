@@ -55,6 +55,43 @@ Setup:
 
 Security: every API call from the mini app is authenticated by validating Telegram's signed `initData` against the bot token (HMAC), and the same group-membership rules as the chat bot are enforced.
 
+#### Reverse proxy requirements (important)
+
+Telegram's webview is strict about how the mini app is served. If it opens to a **blank screen**, the cause is almost always the reverse proxy, not the bot:
+
+- **Valid CA certificate required.** Telegram refuses to load a mini app served with a self-signed certificate (the page just stays blank). Use Let's Encrypt / a trusted CA — not nginx's default snakeoil cert. If the domain isn't configured in nginx at all, requests fall through to the default server (self-signed cert + `403`), which looks the same.
+- **No SSO in front of it.** Don't put the mini app behind Organizr / Authelia / any `auth_request` SSO. Telegram's webview carries no SSO session cookie, so it gets blocked. The mini app authenticates itself via Telegram's signed `initData`.
+
+Example nginx vhost proxying `WEBAPP_URL` to the container's `WEBAPP_PORT` (8095 in the provided `docker-compose.yml`):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name requests.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/requests.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/requests.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8095;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+To issue the certificate, start with an **HTTP-only** version of this block (`listen 80;`, no
+`ssl_*` lines), then run `certbot --nginx -d requests.example.com` — certbot obtains the cert
+and rewrites the block to add the `listen 443 ssl;` + `ssl_certificate*` lines and an
+HTTP→HTTPS redirect. (Adding the `ssl_certificate` lines *before* the cert exists makes
+`nginx -t` fail with `cannot load certificate ... No such file or directory`, which also
+blocks certbot.)
+
+Verify with `curl -s -o /dev/null -w "%{http_code}\n" https://requests.example.com/` — it
+should return `200` with a valid cert (no `-k` needed) before the mini app will load in Telegram.
+
 ### Group Authorization Feature
 
 When `ENABLE_GROUP_AUTH` is enabled, the bot will verify that users are members of at least one of the authorized groups before allowing them to:
@@ -276,6 +313,37 @@ If testing locally and Ombi is accessible directly on your machine:
 ```bash
 OMBI_URL=http://localhost:3579
 ```
+
+### Getting 401 (Organizr SSO blocking the API)
+
+If you point `OMBI_URL` at a public subdirectory URL (e.g. `https://yourdomain.com/ombi`)
+and requests fail with an nginx **401 Authorization Required** HTML page (not a JSON
+error from Ombi), your reverse proxy is protecting `/ombi/` with Organizr SSO
+(`auth_request`). Browser sessions pass because they carry the Organizr cookie, but the
+bot only sends an `ApiKey` header, so the SSO subrequest rejects it before it reaches Ombi.
+
+This works in Docker because the bot talks to `http://ombi:3579` internally and never
+passes through nginx. It only surfaces when running locally against the public URL.
+
+**Fix:** let the Ombi API path bypass SSO (the API is already protected by the `ApiKey`
+header). Add a more-specific `location` *above* the existing `/ombi/` block in your nginx
+config:
+
+```nginx
+location /ombi/api/ {
+  # Ombi's API authenticates via the ApiKey header, so bypass Organizr SSO.
+  auth_request off;
+  proxy_pass http://127.0.0.1:3579/ombi/api/;
+}
+
+location /ombi/ {
+  auth_request /organizr-auth/0;
+  proxy_pass http://127.0.0.1:3579/ombi/;
+}
+```
+
+Then `nginx -t && systemctl reload nginx`. To keep the API private to your machine while
+testing, add `allow YOUR.IP;` and `deny all;` inside the `/ombi/api/` block.
 
 ### Finding Your Ombi URL
 1. **Check your Organizr tabs** - Right-click the Ombi tab and copy the URL
