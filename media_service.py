@@ -10,6 +10,7 @@ import os
 import re
 import logging
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional
 
@@ -44,6 +45,44 @@ class ImdbLookupError(Exception):
     """Raised when an IMDb link can't be resolved to a title."""
 
 
+def _tv_aired_coverage(item: dict) -> Optional[tuple[int, int]]:
+    """Count how many aired episodes are covered by the library or Sonarr.
+
+    Ombi's show-level 'available' flag is set as soon as a single episode has a
+    file in Sonarr, so it alone can't distinguish fully from partially
+    available. Per-episode 'approved' means the episode is monitored in Sonarr
+    (or part of an approved request), so any aired episode without it is one
+    the server will never grab.
+
+    Specials (season 0) and unaired/undated episodes are excluded — Sonarr
+    can't have files for those yet and they'd wrongly downgrade complete shows.
+
+    Returns:
+        (aired_count, covered_count), or None if there is no episode data.
+    """
+    seasons = item.get('seasonRequests')
+    if not isinstance(seasons, list) or not seasons:
+        return None
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    aired = 0
+    covered = 0
+    for season in seasons:
+        if season.get('seasonNumber') == 0:
+            continue
+        for ep in season.get('episodes') or []:
+            air_date = (ep.get('airDate') or '')[:10]
+            if not air_date or air_date.startswith('0001') or air_date > today:
+                continue
+            aired += 1
+            if ep.get('available') or ep.get('approved'):
+                covered += 1
+
+    if aired == 0:
+        return None
+    return (aired, covered)
+
+
 def get_item_status(item: dict):
     """Check item status and return (should_hide_request, status_text).
 
@@ -59,6 +98,15 @@ def get_item_status(item: dict):
 
     # Check if truly available (in library/content provider)
     if item.get('available', False) or item.get('alreadyincp', False) or item.get('fullyAvailable', False):
+        # For TV, 'available' can mean as little as one episode with a file in
+        # Sonarr - use per-episode data to downgrade to partially_available
+        if not item.get('fullyAvailable', False):
+            coverage = _tv_aired_coverage(item)
+            if coverage:
+                aired, covered = coverage
+                if covered < aired:
+                    logger.debug(f"Only {covered}/{aired} aired episodes covered - partially available")
+                    return (True, 'partially_available')
         return (True, 'available')
 
     # Check if partially available (some episodes/seasons available)
@@ -320,6 +368,36 @@ def extract_search_year(query_text: str, item_type: str, imdb_year: Optional[int
     return (query_text, search_year)
 
 
+def _search_tv_v2(query_text: str) -> Optional[list]:
+    """Search TV shows via Ombi's v2 API, returning fully-detailed items.
+
+    The v2 detail endpoint is the only one that reports Sonarr-cache
+    availability (content that exists in Sonarr without an Ombi request), and
+    it also carries theTvDbId (for requesting), imdbId and seasonRequests, so
+    no further enrichment calls are needed.
+
+    Returns None when v2 yields nothing usable so the caller can fall back to
+    the legacy v1 search.
+    """
+    stubs = ombi_client.search_tv_v2(query_text)
+    if not stubs:
+        return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        details = list(pool.map(lambda s: ombi_client.get_tv_info_v2(s.get('id')), stubs))
+
+    results = []
+    for stub, detail in zip(stubs, details):
+        # Without details there is no theTvDbId, and requesting with the wrong
+        # ID type would request a different show - drop the result instead
+        if detail and detail.get('theTvDbId'):
+            results.append(detail)
+        else:
+            logger.warning(f"Dropping TV result without v2 details/TVDB id: '{stub.get('title')}'")
+
+    return results or None
+
+
 def perform_search(item_type: str, query_text: str, search_year: Optional[int] = None) -> list:
     """Search Ombi and post-process the results.
 
@@ -339,6 +417,11 @@ def perform_search(item_type: str, query_text: str, search_year: Optional[int] =
             results = ombi_client.search_movie(query_text)
     else:
         logger.info(f"Searching for TV show with query: '{query_text}'")
+        v2_results = _search_tv_v2(query_text)
+        if v2_results is not None:
+            logger.info(f"v2 TV search returned {len(v2_results)} detailed results for query: '{query_text}'")
+            return v2_results
+        logger.info("v2 TV search yielded nothing, falling back to v1 search")
         results = ombi_client.search_tv(query_text)
 
     logger.info(f"Search returned {len(results) if results else 0} results for query: '{query_text}'")
@@ -346,8 +429,8 @@ def perform_search(item_type: str, query_text: str, search_year: Optional[int] =
     if not results:
         return []
 
-    # For TV shows, get detailed info for the first result which may have more
-    # accurate availability status
+    # For TV shows (legacy v1 fallback path), get detailed info for the first
+    # result which may have more accurate availability status
     if item_type == 'tv':
         first_item = results[0]
         # Try multiple ID fields - Ombi might use TMDB ID for the info endpoint

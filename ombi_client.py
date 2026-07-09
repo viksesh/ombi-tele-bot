@@ -41,9 +41,9 @@ class OmbiClient:
         if self.request_user:
             self.headers['UserName'] = self.request_user
     
-    def _make_request(self, method: str, endpoint: str, headers: Dict = None, **kwargs) -> Optional[Dict]:
+    def _make_request(self, method: str, endpoint: str, headers: Dict = None, api_version: int = 1, **kwargs) -> Optional[Dict]:
         """Make a request to the Ombi API."""
-        url = f"{self.base_url}/api/v1{endpoint}"
+        url = f"{self.base_url}/api/v{api_version}{endpoint}"
         request_headers = headers if headers else self.headers
 
         try:
@@ -149,6 +149,48 @@ class OmbiClient:
             logger.warning(f"TV search returned unexpected type: {type(result)}, value: {str(result)[:500]}")
             return []
     
+    def search_tv_v2(self, query: str) -> List[Dict]:
+        """Search for TV shows via Ombi's v2 multi-search (TMDB-backed).
+
+        The v1 TV search is TVMaze-based and returns items with a null
+        theTvDbId, which makes Ombi skip its Sonarr-cache availability rules —
+        shows that already exist in Sonarr look requestable. The v2 endpoints
+        (the ones Ombi's own web UI uses) report that availability correctly.
+
+        Returns:
+            List of lightweight result stubs: id (TMDB), title, poster, overview.
+        """
+        encoded_query = quote(query)
+        endpoint = f"/search/multi/{encoded_query}"
+        data = {"movies": False, "tvShows": True, "music": False, "people": False}
+        result = self._make_request('POST', endpoint, json=data, api_version=2)
+
+        if not isinstance(result, list):
+            if result is not None:
+                logger.warning(f"v2 TV search returned unexpected type: {type(result)}")
+            return []
+        tv_results = [r for r in result if r.get('mediaType') == 'tv']
+        logger.info(f"v2 TV search returned {len(tv_results)} results for '{query}'")
+        return tv_results
+
+    def get_tv_info_v2(self, tmdb_id) -> Optional[Dict]:
+        """Get detailed TV show information via the v2 API.
+
+        Unlike the v1 info endpoint, this includes availability computed from
+        the Sonarr cache (show-level 'available' plus per-episode 'approved'),
+        and carries theTvDbId needed for submitting requests.
+
+        Args:
+            tmdb_id: The TMDB ID of the show (v2 search result 'id')
+
+        Returns:
+            TV show dictionary, or None on error/no content
+        """
+        endpoint = f"/search/tv/moviedb/{tmdb_id}"
+        result = self._make_request('GET', endpoint, api_version=2)
+        # Ombi returns 204 (empty body) when it can't resolve the show
+        return result or None
+
     def request_movie(self, movie_id: int, user_override: str = None) -> bool:
         """Request a movie in Ombi.
 
