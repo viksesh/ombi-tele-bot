@@ -83,6 +83,50 @@ def _tv_aired_coverage(item: dict) -> Optional[tuple[int, int]]:
     return (aired, covered)
 
 
+def _upcoming_date(value) -> Optional[str]:
+    """Normalize an Ombi date to 'YYYY-MM-DD', or None if missing/past.
+
+    Ombi uses '0001-01-01T00:00:00Z' as its "no date" sentinel.
+    """
+    if not isinstance(value, str):
+        return None
+    date = value[:10]
+    if len(date) != 10 or date.startswith('0001'):
+        return None
+    return date if date >= datetime.now().strftime('%Y-%m-%d') else None
+
+
+def get_expected_date(item: dict, item_type: str) -> Optional[str]:
+    """Best estimate of when an item will land in the library, as 'YYYY-MM-DD'.
+
+    Movies use Ombi's digital release date (only present on the detail
+    endpoints). TV shows use their premiere date, but ONLY for shows that have
+    not aired a single episode yet - a show with any aired episode is either
+    already downloaded (available) or being processed, and a future date for it
+    would be misleading. Dates in the past are dropped.
+
+    Returns None when no date is known.
+    """
+    if item_type == 'movie':
+        return _upcoming_date(item.get('digitalReleaseDate'))
+
+    seasons = item.get('seasonRequests')
+    if not isinstance(seasons, list):
+        return None
+    air_dates = [
+        date
+        for season in seasons if season.get('seasonNumber') != 0
+        for ep in season.get('episodes') or []
+        for date in [(ep.get('airDate') or '')[:10]]
+        if len(date) == 10 and not date.startswith('0001')
+    ]
+    if not air_dates:
+        return None
+    # Only a not-yet-premiered show gets a date: if its earliest episode has
+    # already aired, at least one episode exists to grab, so it isn't "new".
+    return _upcoming_date(min(air_dates))
+
+
 def get_item_status(item: dict):
     """Check item status and return (should_hide_request, status_text).
 
@@ -611,15 +655,26 @@ def submit_request(item_type: str, item_id, item: Optional[dict] = None) -> tupl
 
 
 def enrich_movie_imdb(item: dict) -> None:
-    """Fetch detailed movie info to attach the IMDB ID (search results don't include it)."""
-    if not ombi_client or item.get('imdbId') or item.get('imdbid'):
+    """Fetch detailed movie info to attach the IMDB ID and digital release date.
+
+    Movie search results carry neither: they have no imdbId, and their
+    digitalReleaseDate is always null. Only the detail endpoint fills both in.
+    """
+    if not ombi_client or item.get('_detailsFetched'):
         return
     movie_db_id = item.get('theMovieDbId') or item.get('id')
-    if movie_db_id:
-        movie_info = ombi_client.get_movie_info(movie_db_id)
-        if movie_info and movie_info.get('imdbId'):
-            item['imdbId'] = movie_info['imdbId']
-            logger.debug(f"Fetched IMDB ID for movie: {movie_info['imdbId']}")
+    if not movie_db_id:
+        return
+    movie_info = ombi_client.get_movie_info(movie_db_id)
+    if not movie_info:
+        return
+    item['_detailsFetched'] = True
+    if movie_info.get('imdbId'):
+        item['imdbId'] = movie_info['imdbId']
+        logger.debug(f"Fetched IMDB ID for movie: {movie_info['imdbId']}")
+    if movie_info.get('digitalReleaseDate'):
+        item['digitalReleaseDate'] = movie_info['digitalReleaseDate']
+        logger.debug(f"Fetched digital release date: {movie_info['digitalReleaseDate']}")
 
 
 def enrich_item_imdb(item: dict, item_type: str) -> None:
@@ -628,10 +683,12 @@ def enrich_item_imdb(item: dict, item_type: str) -> None:
     Search results don't include IMDB IDs; only the detail endpoints do. Safe to
     call on every result (it short-circuits when the ID is already known).
     """
-    if not ombi_client or item.get('imdbId') or item.get('imdbid'):
+    if not ombi_client:
         return
     if item_type == 'movie':
         enrich_movie_imdb(item)
+        return
+    if item.get('imdbId') or item.get('imdbid'):
         return
     tv_id = (item.get('theTvDbId') or item.get('tvDbId') or item.get('tvdbId') or
              item.get('theMovieDbId') or item.get('id'))
@@ -647,6 +704,10 @@ def normalize_item(item: dict, item_type: str) -> dict:
     should_hide, status = get_item_status(item)
     imdb_id = item.get('imdbId') or item.get('imdbid')
     rating = get_item_rating(item, item_type)
+    # Pointless for anything already in the library; computed for requestable
+    # items too, so the mini app can show a date the moment a request is approved
+    expected_date = (None if status in ('available', 'partially_available', 'denied')
+                     else get_expected_date(item, item_type))
     return {
         'id': get_item_id(item),
         'type': item_type,
@@ -658,5 +719,6 @@ def normalize_item(item: dict, item_type: str) -> dict:
         'imdbId': imdb_id,
         'imdbUrl': f"https://www.imdb.com/title/{imdb_id}/" if imdb_id else None,
         'status': status,
+        'expectedDate': expected_date,
         'canRequest': not should_hide,
     }

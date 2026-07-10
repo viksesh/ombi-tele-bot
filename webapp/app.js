@@ -10,8 +10,8 @@
 
   const STATUS_LABELS = {
     available: { text: '✅ Available', cls: 'badge-available' },
-    partially_available: { text: '✅ Partially available', cls: 'badge-partial' },
-    approved: { text: '🗓️ Approved', cls: 'badge-approved' },
+    partially_available: { text: '✅ Available', cls: 'badge-available' },
+    approved: { text: '🗓️ Uploads when available', cls: 'badge-approved' },
     requested: { text: '⏳ Requested', cls: 'badge-requested' },
     denied: { text: '❌ Not available', cls: 'badge-denied' },
   };
@@ -110,10 +110,25 @@
 
   // ---------- rendering ----------
 
-  function renderBadge(status) {
+  // 'YYYY-MM-DD' -> '31 Mar' (or '31 Mar 2027' when it isn't this year)
+  function formatExpected(iso) {
+    const parts = iso.split('-');
+    const date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    if (isNaN(date.getTime())) return '';
+    const opts = { day: 'numeric', month: 'short' };
+    if (date.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+    return date.toLocaleDateString(undefined, opts);
+  }
+
+  function renderBadge(status, expectedDate) {
     const info = STATUS_LABELS[status];
     if (!info) return '';
-    return '<span class="badge ' + info.cls + '">' + info.text + '</span>';
+    let text = info.text;
+    if (status === 'approved' && expectedDate) {
+      const when = formatExpected(expectedDate);
+      if (when) text = '🗓️ Expected ' + when;
+    }
+    return '<span class="badge ' + info.cls + '">' + escapeHtml(text) + '</span>';
   }
 
   function escapeHtml(s) {
@@ -141,7 +156,7 @@
         '</div>' +
         '<div class="card-meta">' +
           (item.rating ? '<span class="rating">⭐ ' + item.rating.toFixed(1) + '</span>' : '') +
-          renderBadge(item.status) +
+          renderBadge(item.status, item.expectedDate) +
         '</div>' +
         '<p class="overview">' + escapeHtml(item.overview) + '</p>' +
         '<div class="card-actions">' +
@@ -235,18 +250,22 @@
       item.status = data.autoApproved ? 'approved' : 'requested';
       button.remove();
       const meta = card.querySelector('.card-meta');
-      meta.insertAdjacentHTML('beforeend', renderBadge(item.status));
-      showToast(data.autoApproved
-        ? '✅ Request submitted and approved!'
-        : '✅ Request submitted — pending approval');
+      meta.insertAdjacentHTML('beforeend', renderBadge(item.status, item.expectedDate));
+      let approvedMsg = '✅ Approved — will upload when available';
+      if (item.expectedDate) {
+        const when = formatExpected(item.expectedDate);
+        if (when) approvedMsg = '✅ Approved — expected ' + when;
+      }
+      showToast(data.autoApproved ? approvedMsg : '✅ Request submitted — pending approval');
     } catch (e) {
       if (e.payload && e.payload.error === 'already_handled') {
         haptic('warning');
         item.canRequest = false;
         item.status = e.payload.status;
         button.remove();
-        card.querySelector('.card-meta').insertAdjacentHTML('beforeend', renderBadge(item.status));
-        showToast('This title is already ' + (e.payload.status === 'available' ? 'available' : 'requested') + '.');
+        card.querySelector('.card-meta').insertAdjacentHTML('beforeend', renderBadge(item.status, item.expectedDate));
+        const availableStatuses = ['available', 'partially_available'];
+        showToast('This title is already ' + (availableStatuses.includes(e.payload.status) ? 'available' : 'requested') + '.');
       } else {
         haptic('error');
         button.disabled = false;
