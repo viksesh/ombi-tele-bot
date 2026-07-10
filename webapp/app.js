@@ -301,12 +301,10 @@
       el.input.placeholder = currentType === 'movie'
         ? 'Title, title + year, or IMDb link…'
         : 'TV show title or IMDb link…';
-      // Re-run the search in the new category if there's a query
-      if (el.input.value.trim()) {
-        search();
-      } else {
-        setView('empty');
-      }
+      // Clear the previous query so switching tabs starts a fresh search
+      el.input.value = '';
+      lastQuery = '';
+      setView('empty');
     });
   });
 
