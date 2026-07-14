@@ -29,6 +29,44 @@ WEBAPP_PORT = int(os.getenv('WEBAPP_PORT', '8080'))
 SESSION_TTL_SECONDS = 3600
 _sessions: dict = {}  # user_id -> {'ts': float, 'movie': [...], 'tv': [...]}
 
+# Per-user daily request cap. 0 (default) disables the limit. Counts reset at
+# UTC midnight and are kept in-memory (reset on process restart).
+MAX_REQUESTS_PER_DAY = int(os.getenv('MAX_REQUESTS_PER_DAY', '0'))
+_request_counts: dict = {}  # user_id -> {'day': 'YYYY-MM-DD', 'count': int}
+
+
+def _user_label(user: dict) -> str:
+    """Human-readable identifier for logs: 'First Last (@username) [id]'."""
+    name = ' '.join(p for p in (user.get('first_name'), user.get('last_name')) if p)
+    username = user.get('username')
+    parts = []
+    if name:
+        parts.append(name)
+    if username:
+        parts.append(f"@{username}")
+    label = ' '.join(parts)
+    return f"{label} [{user['id']}]" if label else f"[{user['id']}]"
+
+
+def _day_key() -> str:
+    return time.strftime('%Y-%m-%d', time.gmtime())
+
+
+def _requests_today(user_id: int) -> int:
+    entry = _request_counts.get(user_id)
+    if not entry or entry['day'] != _day_key():
+        return 0
+    return entry['count']
+
+
+def _record_request(user_id: int) -> None:
+    day = _day_key()
+    entry = _request_counts.get(user_id)
+    if not entry or entry['day'] != day:
+        _request_counts[user_id] = {'day': day, 'count': 1}
+    else:
+        entry['count'] += 1
+
 
 def _get_session(user_id: int) -> dict:
     now = time.time()
@@ -81,8 +119,9 @@ async def handle_search(request: web.Request) -> web.Response:
     if not raw_query:
         return _json_error("Please enter a title or IMDb link.")
 
-    user_id = request['user']['id']
-    logger.info(f"Mini app search from user {user_id}: type={item_type}, query='{raw_query}'")
+    user = request['user']
+    user_id = user['id']
+    logger.info(f"Mini app search from {_user_label(user)}: type={item_type}, query='{raw_query}'")
 
     try:
         results = await asyncio.to_thread(media_service.search_from_raw_query, item_type, raw_query)
@@ -146,7 +185,8 @@ async def handle_request_item(request: web.Request) -> web.Response:
     if not item_id:
         return _json_error("Missing item id.")
 
-    user_id = request['user']['id']
+    user = request['user']
+    user_id = user['id']
     item = _find_session_item(user_id, item_type, item_id)
 
     # Same guard as the bot's quick request: don't re-request available items
@@ -155,7 +195,16 @@ async def handle_request_item(request: web.Request) -> web.Response:
         if should_hide:
             return web.json_response({'ok': False, 'error': 'already_handled', 'status': status})
 
-    logger.info(f"Mini app request from user {user_id}: type={item_type}, id={item_id}")
+    # Per-user daily request cap (checked before submitting; only successful
+    # requests count toward the limit).
+    if MAX_REQUESTS_PER_DAY and _requests_today(user_id) >= MAX_REQUESTS_PER_DAY:
+        logger.info(f"Mini app request from {_user_label(user)} blocked: daily limit of {MAX_REQUESTS_PER_DAY} reached")
+        return _json_error(
+            f"You've reached your daily limit of {MAX_REQUESTS_PER_DAY} requests. Please try again tomorrow.",
+            status=429,
+        )
+
+    logger.info(f"Mini app request from {_user_label(user)}: type={item_type}, id={item_id}")
 
     try:
         success, auto_approved = await asyncio.to_thread(
@@ -170,6 +219,7 @@ async def handle_request_item(request: web.Request) -> web.Response:
     if not success:
         return _json_error("Failed to submit request. Please try again.", status=502)
 
+    _record_request(user_id)
     return web.json_response({'ok': True, 'autoApproved': auto_approved})
 
 

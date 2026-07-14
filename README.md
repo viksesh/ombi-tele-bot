@@ -42,6 +42,7 @@ The following environment variables are required:
 - `WEBAPP_URL` - (Optional) Public HTTPS URL of the mini app (e.g., `https://requests.yourdomain.com`). When set, the bot starts the mini app web server, shows an "✨ Open Mini App" button in the main menu, and sets the chat menu button to open the app. Telegram requires HTTPS, so front the web server with a reverse proxy. Leave unset to run messaging-only.
 - `WEBAPP_PORT` - (Optional) Port the mini app web server listens on inside the container. Default: `8080`.
 - `WEBAPP_INIT_DATA_MAX_AGE` - (Optional) Max age in seconds of Telegram WebApp auth data before it's rejected. Default: `86400` (24h).
+- `MAX_REQUESTS_PER_DAY` - (Optional) Maximum number of successful requests a single user may submit per day (resets at UTC midnight). `0` (default) disables the limit. Counts are held in-memory and reset on restart.
 
 ### Telegram Mini App
 
