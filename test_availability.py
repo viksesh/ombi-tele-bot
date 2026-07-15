@@ -176,26 +176,57 @@ class TestGetItemStatusSonarrAvailability:
         assert should_hide is True
         assert status == 'denied'
 
-    def test_season_level_denied_detected(self):
-        """Ombi denies TV per-season; no show-level denied flag is set."""
-        seasons = [{'seasonNumber': 1, 'denied': True, 'episodes': [_ep(1)]}]
-        item = _show(seasons, requestId=42, requested=True)
+    def test_merged_denied_flag_hides_request(self):
+        """A denied show gets denied=True stamped on it by the request merge."""
+        seasons = [{'seasonNumber': 1, 'episodes': [_ep(1, aired=False)]}]
+        item = _show(seasons, denied=True)  # as _merge_tv_request_state would set it
         should_hide, status = get_item_status(item)
         assert should_hide is True
         assert status == 'denied'
 
-    def test_episode_level_denied_detected(self):
-        seasons = [{'seasonNumber': 1, 'episodes': [
-            dict(_ep(1), denied=True),
-        ]}]
-        item = _show(seasons, requestId=42, requested=True)
-        should_hide, status = get_item_status(item)
-        assert should_hide is True
-        assert status == 'denied'
 
-    def test_no_denied_season_still_requestable(self):
-        seasons = [{'seasonNumber': 1, 'denied': False, 'episodes': [_ep(1, aired=False)]}]
-        item = _show(seasons)
-        should_hide, status = get_item_status(item)
-        assert should_hide is False
-        assert status is None
+class TestMergeTvRequestState:
+    """Ombi's search/detail endpoints report requestId=0 / denied=null for a
+    show that was actually requested or denied - _merge_tv_request_state stamps
+    the real state from the TV request list (keyed by tvDbId)."""
+
+    def _run(self, requests_list, item):
+        from media_service import _merge_tv_request_state
+        with patch('media_service.ombi_client') as mock_client:
+            mock_client.get_tv_requests.return_value = requests_list
+            _merge_tv_request_state([item])
+        return item
+
+    def test_denied_child_request_marks_denied(self):
+        reqs = [{'tvDbId': 70600, 'childRequests': [{'denied': True, 'approved': False}]}]
+        item = self._run(reqs, _show([], theTvDbId='70600'))
+        assert item['denied'] is True
+        assert get_item_status(item) == (True, 'denied')
+
+    def test_approved_child_request_marks_approved(self):
+        reqs = [{'id': 5, 'tvDbId': 70600,
+                 'childRequests': [{'denied': False, 'approved': True}]}]
+        item = self._run(reqs, _show([], theTvDbId='70600'))
+        assert item['approved'] is True
+        assert item['requestId'] == 5
+
+    def test_pending_child_request_marks_requested(self):
+        reqs = [{'id': 9, 'tvDbId': 70600,
+                 'childRequests': [{'denied': False, 'approved': False}]}]
+        item = self._run(reqs, _show([], theTvDbId='70600'))
+        assert item['requested'] is True
+        assert item['requestId'] == 9
+
+    def test_no_matching_request_left_requestable(self):
+        reqs = [{'tvDbId': 999, 'childRequests': [{'denied': True}]}]
+        item = self._run(reqs, _show([], theTvDbId='70600'))
+        assert not item.get('denied')
+        assert get_item_status(item) == (False, None)
+
+    def test_fetch_failure_is_non_fatal(self):
+        from media_service import _merge_tv_request_state
+        item = _show([], theTvDbId='70600')
+        with patch('media_service.ombi_client') as mock_client:
+            mock_client.get_tv_requests.side_effect = RuntimeError("boom")
+            _merge_tv_request_state([item])  # must not raise
+        assert get_item_status(item) == (False, None)

@@ -191,6 +191,17 @@ class OmbiClient:
         # Ombi returns 204 (empty body) when it can't resolve the show
         return result or None
 
+    def get_tv_requests(self) -> List[Dict]:
+        """Fetch all TV requests from Ombi.
+
+        The search/detail endpoints don't carry request state - a show that was
+        requested, approved or denied still comes back with requestId=0 and
+        denied=null. Only the request list records that, keyed by tvDbId, with
+        the denied/approved flags living on each childRequest.
+        """
+        result = self._make_request('GET', '/Request/tv')
+        return result if isinstance(result, list) else []
+
     def request_movie(self, movie_id: int, user_override: str = None) -> bool:
         """Request a movie in Ombi.
 

@@ -127,33 +127,12 @@ def get_expected_date(item: dict, item_type: str) -> Optional[str]:
     return _upcoming_date(min(air_dates))
 
 
-def _tv_has_denied_request(item: dict) -> bool:
-    """Detect a denied TV request hiding in per-season/per-episode data.
-
-    Ombi denies TV at the child-request (season/episode) level rather than
-    setting a show-level 'denied' flag, so a denied show comes back from the
-    v2 detail endpoint with denied seasons but denied=False at the top level.
-    """
-    season_requests = item.get('seasonRequests')
-    if not isinstance(season_requests, list):
-        return False
-    for season in season_requests:
-        if not isinstance(season, dict):
-            continue
-        if season.get('denied') or season.get('Denied') or season.get('isDenied'):
-            return True
-        episodes = season.get('episodes')
-        if isinstance(episodes, list):
-            for ep in episodes:
-                if isinstance(ep, dict) and (
-                    ep.get('denied') or ep.get('Denied') or ep.get('isDenied')
-                ):
-                    return True
-    return False
-
-
 def get_item_status(item: dict):
     """Check item status and return (should_hide_request, status_text).
+
+    For TV shows the denied/requested/approved flags are populated by
+    _merge_tv_request_state (the search/detail endpoints don't carry request
+    state), so this reads the same top-level flags for movies and TV.
 
     Returns:
         tuple: (bool, str) - (True if request should be hidden, status message)
@@ -163,12 +142,6 @@ def get_item_status(item: dict):
     denied = item.get('denied', False) or item.get('Denied', False) or item.get('isDenied', False)
     if denied:
         logger.debug(f"Item is denied (denied={denied}, deniedReason={item.get('deniedReason')})")
-        return (True, 'denied')
-
-    # TV shows carry no show-level denied flag - Ombi records the denial on the
-    # season/episode child requests, so inspect those too.
-    if _tv_has_denied_request(item):
-        logger.debug("Item has a denied season/episode request - treating as denied")
         return (True, 'denied')
 
     # Check if truly available (in library/content provider)
@@ -470,7 +443,49 @@ def _search_tv_v2(query_text: str) -> Optional[list]:
         else:
             logger.warning(f"Dropping TV result without v2 details/TVDB id: '{stub.get('title')}'")
 
+    _merge_tv_request_state(results)
     return results or None
+
+
+def _merge_tv_request_state(results: list) -> None:
+    """Stamp Ombi request state (denied/approved/requested) onto search results.
+
+    The v2 detail endpoint reports Sonarr-cache availability but not request
+    state - a requested/approved/denied show still comes back with requestId=0
+    and denied=null. The authoritative record is the TV request list, keyed by
+    tvDbId, with the flags on each childRequest. Without this merge a denied
+    show looks freely requestable.
+    """
+    if not results:
+        return
+    try:
+        requests_list = ombi_client.get_tv_requests()
+    except Exception as e:
+        logger.warning(f"Could not fetch TV requests to merge denial state: {e}")
+        return
+
+    by_tvdb = {}
+    for req in requests_list:
+        tvdb = str(req.get('tvDbId') or '')
+        if tvdb:
+            by_tvdb[tvdb] = req
+
+    for item in results:
+        req = by_tvdb.get(str(item.get('theTvDbId') or ''))
+        if not req:
+            continue
+        children = req.get('childRequests') or []
+        # denied beats everything (matches get_item_status priority); a show is
+        # only requestable again once the denial is cleared in Ombi.
+        if any(c.get('denied') for c in children):
+            item['denied'] = True
+            logger.debug(f"'{item.get('title')}' has a denied request - marking denied")
+        elif any(c.get('approved') for c in children):
+            item['approved'] = True
+            item['requestId'] = req.get('id') or item.get('requestId')
+        elif children:
+            item['requested'] = True
+            item['requestId'] = req.get('id') or item.get('requestId')
 
 
 def perform_search(item_type: str, query_text: str, search_year: Optional[int] = None) -> list:
