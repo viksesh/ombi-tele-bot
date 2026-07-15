@@ -175,3 +175,27 @@ class TestGetItemStatusSonarrAvailability:
         should_hide, status = get_item_status(item)
         assert should_hide is True
         assert status == 'denied'
+
+    def test_season_level_denied_detected(self):
+        """Ombi denies TV per-season; no show-level denied flag is set."""
+        seasons = [{'seasonNumber': 1, 'denied': True, 'episodes': [_ep(1)]}]
+        item = _show(seasons, requestId=42, requested=True)
+        should_hide, status = get_item_status(item)
+        assert should_hide is True
+        assert status == 'denied'
+
+    def test_episode_level_denied_detected(self):
+        seasons = [{'seasonNumber': 1, 'episodes': [
+            dict(_ep(1), denied=True),
+        ]}]
+        item = _show(seasons, requestId=42, requested=True)
+        should_hide, status = get_item_status(item)
+        assert should_hide is True
+        assert status == 'denied'
+
+    def test_no_denied_season_still_requestable(self):
+        seasons = [{'seasonNumber': 1, 'denied': False, 'episodes': [_ep(1, aired=False)]}]
+        item = _show(seasons)
+        should_hide, status = get_item_status(item)
+        assert should_hide is False
+        assert status is None

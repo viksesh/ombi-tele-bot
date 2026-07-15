@@ -127,6 +127,31 @@ def get_expected_date(item: dict, item_type: str) -> Optional[str]:
     return _upcoming_date(min(air_dates))
 
 
+def _tv_has_denied_request(item: dict) -> bool:
+    """Detect a denied TV request hiding in per-season/per-episode data.
+
+    Ombi denies TV at the child-request (season/episode) level rather than
+    setting a show-level 'denied' flag, so a denied show comes back from the
+    v2 detail endpoint with denied seasons but denied=False at the top level.
+    """
+    season_requests = item.get('seasonRequests')
+    if not isinstance(season_requests, list):
+        return False
+    for season in season_requests:
+        if not isinstance(season, dict):
+            continue
+        if season.get('denied') or season.get('Denied') or season.get('isDenied'):
+            return True
+        episodes = season.get('episodes')
+        if isinstance(episodes, list):
+            for ep in episodes:
+                if isinstance(ep, dict) and (
+                    ep.get('denied') or ep.get('Denied') or ep.get('isDenied')
+                ):
+                    return True
+    return False
+
+
 def get_item_status(item: dict):
     """Check item status and return (should_hide_request, status_text).
 
@@ -138,6 +163,12 @@ def get_item_status(item: dict):
     denied = item.get('denied', False) or item.get('Denied', False) or item.get('isDenied', False)
     if denied:
         logger.debug(f"Item is denied (denied={denied}, deniedReason={item.get('deniedReason')})")
+        return (True, 'denied')
+
+    # TV shows carry no show-level denied flag - Ombi records the denial on the
+    # season/episode child requests, so inspect those too.
+    if _tv_has_denied_request(item):
+        logger.debug("Item has a denied season/episode request - treating as denied")
         return (True, 'denied')
 
     # Check if truly available (in library/content provider)
