@@ -271,6 +271,57 @@ class OmbiClient:
             result = self._make_request('POST', endpoint, json=data)
         return result is not None
     
+    def request_tv_v2(self, tmdb_id, user_override: str = None) -> bool:
+        """Request a TV show via Ombi's v2 (TheMovieDb-based) request endpoint.
+
+        The v1 /Request/tv endpoint resolves the show by looking it up in TVMaze
+        by TVDB id. When TVMaze has no TVDB mapping for a show - common for
+        brand-new titles - that lookup returns null and Ombi throws a
+        NullReferenceException (HTTP 500). The v2 endpoint takes the TMDB id and
+        resolves through TheMovieDb, which is where our search results already
+        come from, so it isn't affected.
+
+        Args:
+            tmdb_id: The TMDB ID of the show
+            user_override: Optional username to override the default request user
+
+        Returns:
+            True if request was successful, False otherwise
+        """
+        try:
+            tmdb_id = int(tmdb_id)
+        except (TypeError, ValueError):
+            logger.warning(f"Cannot make v2 TV request with non-numeric TMDB id: {tmdb_id!r}")
+            return False
+
+        endpoint = "/Requests/tv"
+        data = {"theMovieDbId": tmdb_id, "requestAll": True, "languageCode": "en"}
+
+        request_user = user_override or self.request_user
+        if request_user:
+            logger.info(f"Making v2 TV request on behalf of user: {request_user} (via UserName header)")
+        else:
+            logger.warning("No request user set, request will be made with API key user")
+
+        logger.debug(f"v2 TV request payload: {data}")
+
+        headers = None
+        if user_override:
+            headers = self.headers.copy()
+            headers['UserName'] = user_override
+        result = self._make_request('POST', endpoint, json=data, headers=headers, api_version=2)
+        return self._request_succeeded(result)
+
+    @staticmethod
+    def _request_succeeded(result) -> bool:
+        """Check an Ombi RequestEngineResult body (2xx can still mean rejected)."""
+        if result is None:
+            return False
+        if isinstance(result, dict) and result.get('result') is False:
+            logger.error(f"Ombi rejected the request: {result.get('errorMessage')}")
+            return False
+        return True
+
     def get_movie_info(self, movie_id: int) -> Optional[Dict]:
         """Get detailed movie information from Ombi.
 

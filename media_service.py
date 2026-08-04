@@ -652,6 +652,33 @@ def should_auto_approve(item: dict, item_type: str) -> tuple[bool, str]:
     return (False, "")
 
 
+def get_tmdb_id(item: Optional[dict]):
+    """Extract the TMDB ID from an item, if it carries one.
+
+    v2 search results set theMovieDbId (as a string); v1/TVMaze-backed results
+    generally don't, so this returns None for them.
+    """
+    if not item:
+        return None
+    return item.get('theMovieDbId') or item.get('tmdbId') or item.get('tmdb_id')
+
+
+def _submit_tv_request(item_id, item: Optional[dict], user_override: Optional[str]) -> bool:
+    """Submit a TV request, preferring Ombi's TMDB-based v2 endpoint.
+
+    Ombi's v1 /Request/tv looks the show up in TVMaze by TVDB id and 500s with
+    "Object reference not set to an instance of an object" when TVMaze has no
+    TVDB mapping for it (brand-new shows). Requesting by TMDB id via v2 avoids
+    TVMaze entirely; fall back to v1 when we have no TMDB id.
+    """
+    tmdb_id = get_tmdb_id(item)
+    if tmdb_id:
+        if ombi_client.request_tv_v2(tmdb_id, user_override):
+            return True
+        logger.warning(f"v2 TV request failed for TMDB id {tmdb_id}, falling back to v1 with ID {item_id}")
+    return ombi_client.request_tv(item_id, user_override)
+
+
 def submit_request(item_type: str, item_id, item: Optional[dict] = None) -> tuple[bool, bool]:
     """Submit a request to Ombi, applying the auto-approve rules.
 
@@ -691,7 +718,7 @@ def submit_request(item_type: str, item_id, item: Optional[dict] = None) -> tupl
     if item_type == 'movie':
         success = ombi_client.request_movie(item_id, user_override)
     else:
-        success = ombi_client.request_tv(item_id, user_override)
+        success = _submit_tv_request(item_id, item, user_override)
 
     if success and item is not None:
         # Mark as requested so cached result lists reflect the new status
