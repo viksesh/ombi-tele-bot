@@ -44,7 +44,8 @@ html, body {
   border: none;
   background: transparent;
   color: var(--hint);
-  font-size: 15px;
+  font-size: 14.5px;
+  white-space: nowrap;
   font-weight: 600;
   padding: 9px 0;
   border-radius: 11px;
@@ -228,6 +229,36 @@ html, body {
   font-size: 13px;
   font-weight: 600;
   text-decoration: none;
+}
+
+/* ---------- My requests ---------- */
+
+.mine-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.link-btn {
+  border: none;
+  background: transparent;
+  color: var(--link);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 2px;
+  cursor: pointer;
+}
+
+.link-btn:active { opacity: 0.6; }
+
+.history-card .card-body { justify-content: center; }
+
+.history-card .poster { width: 62px; height: 93px; font-size: 24px; }
+
+.requested-at {
+  color: var(--hint);
+  font-size: 12.5px;
 }
 
 /* ---------- Toast ---------- */

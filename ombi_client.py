@@ -202,6 +202,16 @@ class OmbiClient:
         result = self._make_request('GET', '/Request/tv')
         return result if isinstance(result, list) else []
 
+    def get_movie_requests(self) -> List[Dict]:
+        """Fetch all movie requests from Ombi.
+
+        Keyed by theMovieDbId, each record carries the live approved/denied/
+        available flags - the authoritative state for a request after it was
+        submitted (used by the mini app's "Requests" tab).
+        """
+        result = self._make_request('GET', '/Request/movie')
+        return result if isinstance(result, list) else []
+
     def request_movie(self, movie_id: int, user_override: str = None) -> bool:
         """Request a movie in Ombi.
 

@@ -12,9 +12,10 @@
     <header class="header">
       <div class="type-toggle" role="tablist">
         <button id="tab-movie" class="type-tab active" role="tab" data-type="movie">🎬 Movies</button>
-        <button id="tab-tv" class="type-tab" role="tab" data-type="tv">📺 TV Shows</button>
+        <button id="tab-tv" class="type-tab" role="tab" data-type="tv">📺 TV</button>
+        <button id="tab-mine" class="type-tab" role="tab" data-view="mine">📋 Requests</button>
       </div>
-      <div class="search-bar">
+      <div class="search-bar" id="search-bar">
         <input
           id="search-input"
           type="search"
@@ -54,6 +55,20 @@
       <div id="results" class="hidden">
         <p id="results-count" class="results-count"></p>
         <div id="results-list"></div>
+      </div>
+
+      <div id="mine-empty" class="state-block hidden">
+        <div class="state-emoji">📋</div>
+        <h2>Nothing here yet</h2>
+        <p id="mine-empty-text">Movies and TV shows you request will show up here so you can check on them later.</p>
+      </div>
+
+      <div id="mine" class="hidden">
+        <div class="mine-header">
+          <p id="mine-count" class="results-count"></p>
+          <button id="mine-refresh" class="link-btn" type="button">↻ Refresh</button>
+        </div>
+        <div id="mine-list"></div>
       </div>
     </main>
 

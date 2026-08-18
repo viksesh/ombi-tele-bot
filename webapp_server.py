@@ -17,6 +17,7 @@ import time
 from aiohttp import web
 
 import media_service
+import request_history
 import telegram_auth
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,15 @@ async def handle_request_item(request: web.Request) -> web.Response:
     user_id = user['id']
     item = _find_session_item(user_id, item_type, item_id)
 
+    # Session expired (e.g. requesting from the history view or after a
+    # restart): fetch the item so both the auto-approve checks and the history
+    # entry have real metadata to work with.
+    if item is None:
+        try:
+            item = await asyncio.to_thread(media_service.fetch_item, item_type, item_id)
+        except Exception as e:
+            logger.warning(f"Could not fetch {item_type} {item_id} before requesting: {e}")
+
     # Same guard as the bot's quick request: don't re-request available items
     if item:
         should_hide, status = media_service.get_item_status(item)
@@ -220,7 +230,44 @@ async def handle_request_item(request: web.Request) -> web.Response:
         return _json_error("Failed to submit request. Please try again.", status=502)
 
     _record_request(user_id)
+    await asyncio.to_thread(_save_history_entry, user_id, item_type, item_id, item, auto_approved)
     return web.json_response({'ok': True, 'autoApproved': auto_approved})
+
+
+def _save_history_entry(user_id: int, item_type: str, item_id, item: dict | None,
+                        auto_approved: bool) -> None:
+    """Record a successful request in the user's history (best effort)."""
+    normalized = media_service.normalize_item(item, item_type) if item else {}
+    request_history.record_request(
+        user_id=user_id,
+        item_type=item_type,
+        item_id=item_id,
+        title=normalized.get('title') or 'Unknown',
+        year=normalized.get('year'),
+        poster=normalized.get('poster'),
+        status='approved' if auto_approved else 'requested',
+        auto_approved=auto_approved,
+    )
+
+
+async def handle_my_requests(request: web.Request) -> web.Response:
+    """Return the user's own recent requests, with live status from Ombi."""
+    user = request['user']
+    entries = await asyncio.to_thread(request_history.list_requests, user['id'])
+    logger.debug(f"Mini app history for {_user_label(user)}: {len(entries)} entries")
+
+    if entries:
+        try:
+            await asyncio.to_thread(media_service.refresh_request_statuses, entries)
+        except Exception as e:
+            # Stored statuses are still useful - show them rather than failing
+            logger.warning(f"Could not refresh request statuses: {e}")
+
+    return web.json_response({
+        'ok': True,
+        'requests': entries,
+        'retentionDays': request_history.RETENTION_DAYS,
+    })
 
 
 async def handle_details(request: web.Request) -> web.Response:
@@ -296,6 +343,7 @@ def create_app(bot_token: str) -> web.Application:
     app.router.add_post('/api/search', handle_search)
     app.router.add_post('/api/request', handle_request_item)
     app.router.add_get('/api/details', handle_details)
+    app.router.add_get('/api/my-requests', handle_my_requests)
     app.router.add_static('/static/', WEBAPP_DIR)
     return app
 

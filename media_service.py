@@ -8,6 +8,7 @@ are thin presentation layers on top of it.
 
 import os
 import re
+import time
 import logging
 import requests
 from concurrent.futures import ThreadPoolExecutor
@@ -725,6 +726,123 @@ def submit_request(item_type: str, item_id, item: Optional[dict] = None) -> tupl
         item['requested'] = True
 
     return (success, auto_approve)
+
+
+def fetch_item(item_type: str, item_id) -> Optional[dict]:
+    """Fetch the raw Ombi item for an ID (used when a mini app session expired)."""
+    if not ombi_client:
+        return None
+    if item_type == 'movie':
+        return ombi_client.get_movie_info(item_id)
+    return ombi_client.get_tv_info(item_id)
+
+
+# ---------- live request state (backs the mini app's "Requests" tab) ----------
+
+# Ombi's request lists are the only place a submitted request's current state
+# lives. They're fetched whole (one call per media type) and cached briefly so
+# a history view with many entries doesn't hammer Ombi.
+REQUEST_STATE_TTL_SECONDS = int(os.getenv('REQUEST_STATE_TTL_SECONDS', '60'))
+_request_state_cache: dict = {}  # item_type -> (fetched_at, {item_id: state})
+
+
+def _movie_request_state(req: dict) -> dict:
+    """Derive (status, expectedDate) from an Ombi movie request record."""
+    if req.get('denied'):
+        status = 'denied'
+    elif req.get('available'):
+        status = 'available'
+    elif req.get('approved'):
+        status = 'approved'
+    else:
+        status = 'requested'
+    expected = None if status in ('available', 'denied') else _upcoming_date(req.get('digitalReleaseDate'))
+    return {'status': status, 'expectedDate': expected}
+
+
+def _tv_request_state(req: dict) -> dict:
+    """Derive (status, expectedDate) from an Ombi TV request record.
+
+    Availability is per episode, so a show counts as available only once every
+    requested episode has a file; anything in between is partially available.
+    """
+    children = req.get('childRequests') or []
+    # Denied beats everything, matching get_item_status's priority
+    if any(c.get('denied') for c in children):
+        return {'status': 'denied', 'expectedDate': None}
+
+    episodes = [
+        ep
+        for child in children
+        for season in child.get('seasonRequests') or []
+        for ep in season.get('episodes') or []
+    ]
+    if episodes:
+        available = sum(1 for ep in episodes if ep.get('available'))
+        if available == len(episodes):
+            return {'status': 'available', 'expectedDate': None}
+        if available:
+            return {'status': 'partially_available', 'expectedDate': None}
+
+    if any(c.get('approved') for c in children):
+        return {'status': 'approved', 'expectedDate': None}
+    return {'status': 'requested', 'expectedDate': None}
+
+
+def get_request_state_map(item_type: str) -> dict:
+    """Map of request ID -> current state for every request of a media type.
+
+    Movies are keyed by TMDB id and TV shows by TVDB id, which is what
+    get_item_id returns for each (and therefore what history rows store).
+    Returns an empty map when Ombi is unreachable, so callers fall back to the
+    status recorded at request time.
+    """
+    if not ombi_client:
+        return {}
+
+    cached = _request_state_cache.get(item_type)
+    if cached and time.time() - cached[0] < REQUEST_STATE_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        if item_type == 'movie':
+            requests_list = ombi_client.get_movie_requests()
+            states = {
+                str(req.get('theMovieDbId')): _movie_request_state(req)
+                for req in requests_list if req.get('theMovieDbId')
+            }
+        else:
+            requests_list = ombi_client.get_tv_requests()
+            states = {
+                str(req.get('tvDbId')): _tv_request_state(req)
+                for req in requests_list if req.get('tvDbId')
+            }
+    except Exception as e:
+        logger.warning(f"Could not fetch {item_type} request state from Ombi: {e}")
+        return {}
+
+    logger.debug(f"Fetched state for {len(states)} {item_type} requests")
+    _request_state_cache[item_type] = (time.time(), states)
+    return states
+
+
+def refresh_request_statuses(entries: list) -> list:
+    """Update stored history entries in place with their current Ombi status.
+
+    Entries Ombi no longer knows about (request deleted, or made under a
+    different Ombi user) keep the status recorded when they were requested.
+    """
+    needed = {entry['type'] for entry in entries if entry.get('type')}
+    state_maps = {item_type: get_request_state_map(item_type) for item_type in needed}
+
+    for entry in entries:
+        state = state_maps.get(entry.get('type'), {}).get(str(entry.get('id')))
+        if state:
+            entry['status'] = state['status']
+            entry['expectedDate'] = state['expectedDate']
+        else:
+            entry.setdefault('expectedDate', None)
+    return entries
 
 
 def enrich_movie_imdb(item: dict) -> None:

@@ -18,6 +18,7 @@
 
   const el = {
     tabs: document.querySelectorAll('.type-tab'),
+    searchBar: document.getElementById('search-bar'),
     input: document.getElementById('search-input'),
     searchBtn: document.getElementById('search-btn'),
     hint: document.getElementById('search-hint'),
@@ -30,10 +31,18 @@
     results: document.getElementById('results'),
     resultsCount: document.getElementById('results-count'),
     resultsList: document.getElementById('results-list'),
+    mine: document.getElementById('mine'),
+    mineEmpty: document.getElementById('mine-empty'),
+    mineEmptyText: document.getElementById('mine-empty-text'),
+    mineCount: document.getElementById('mine-count'),
+    mineList: document.getElementById('mine-list'),
+    mineRefresh: document.getElementById('mine-refresh'),
     toast: document.getElementById('toast'),
   };
 
   let currentType = 'movie';
+  // 'search' (Movies/TV tabs) or 'mine' (request history tab)
+  let currentTab = 'search';
   let lastQuery = '';
   let toastTimer = null;
 
@@ -62,6 +71,8 @@
     el.loading.classList.toggle('hidden', view !== 'loading');
     el.errorState.classList.toggle('hidden', view !== 'error');
     el.results.classList.toggle('hidden', view !== 'results');
+    el.mine.classList.toggle('hidden', view !== 'mine');
+    el.mineEmpty.classList.toggle('hidden', view !== 'mine-empty');
   }
 
   function showError(message) {
@@ -110,14 +121,30 @@
 
   // ---------- rendering ----------
 
-  // 'YYYY-MM-DD' -> '31 Mar' (or '31 Mar 2027' when it isn't this year)
-  function formatExpected(iso) {
-    const parts = iso.split('-');
-    const date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  // Date -> '31 Mar' (or '31 Mar 2027' when it isn't this year)
+  function formatDate(date) {
     if (isNaN(date.getTime())) return '';
     const opts = { day: 'numeric', month: 'short' };
     if (date.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
     return date.toLocaleDateString(undefined, opts);
+  }
+
+  // 'YYYY-MM-DD' -> '31 Mar' (or '31 Mar 2027' when it isn't this year)
+  function formatExpected(iso) {
+    const parts = iso.split('-');
+    return formatDate(new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
+  }
+
+  // ISO timestamp -> 'Today' / 'Yesterday' / '4 days ago' / '31 Mar'
+  function formatRequestedAt(iso) {
+    const date = new Date(iso);
+    if (isNaN(date.getTime())) return '';
+    const startOfDay = function (d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+    const days = Math.round((startOfDay(new Date()) - startOfDay(date)) / 86400000);
+    if (days <= 0) return 'Today';
+    if (days === 1) return 'Yesterday';
+    if (days < 7) return days + ' days ago';
+    return formatDate(date);
   }
 
   function renderBadge(status, expectedDate) {
@@ -137,19 +164,21 @@
     return div.innerHTML;
   }
 
+  function renderPoster(item) {
+    const typeEmoji = item.type === 'movie' ? '🎬' : '📺';
+    return item.poster
+      ? '<img class="poster" src="' + escapeHtml(item.poster) + '" alt="" loading="lazy" onerror="this.outerHTML=\'<div class=poster>' + typeEmoji + '</div>\'">'
+      : '<div class="poster">' + typeEmoji + '</div>';
+  }
+
   function renderCard(item, index) {
     const card = document.createElement('div');
     card.className = 'card';
     card.dataset.id = item.id;
     card.dataset.index = index;
 
-    const typeEmoji = item.type === 'movie' ? '🎬' : '📺';
-    const posterHtml = item.poster
-      ? '<img class="poster" src="' + escapeHtml(item.poster) + '" alt="" loading="lazy" onerror="this.outerHTML=\'<div class=poster>' + typeEmoji + '</div>\'">'
-      : '<div class="poster">' + typeEmoji + '</div>';
-
     card.innerHTML =
-      posterHtml +
+      renderPoster(item) +
       '<div class="card-body">' +
         '<div class="card-title">' + escapeHtml(item.title) +
           (item.year ? ' <span class="year">(' + item.year + ')</span>' : '') +
@@ -196,6 +225,49 @@
     setView('results');
   }
 
+  function renderHistoryCard(entry) {
+    const card = document.createElement('div');
+    card.className = 'card history-card';
+    card.dataset.id = entry.id;
+
+    const when = formatRequestedAt(entry.requestedAt);
+    card.innerHTML =
+      renderPoster(entry) +
+      '<div class="card-body">' +
+        '<div class="card-title">' + escapeHtml(entry.title) +
+          (entry.year ? ' <span class="year">(' + entry.year + ')</span>' : '') +
+        '</div>' +
+        '<div class="card-meta">' +
+          '<span class="rating">' + (entry.type === 'movie' ? '🎬 Movie' : '📺 TV') + '</span>' +
+          renderBadge(entry.status, entry.expectedDate) +
+        '</div>' +
+        (when ? '<p class="requested-at">Requested ' + escapeHtml(when) + '</p>' : '') +
+      '</div>';
+
+    return card;
+  }
+
+  function renderHistory(entries, retentionDays) {
+    const windowText = retentionDays > 0
+      ? ' from the last ' + retentionDays + ' days'
+      : '';
+
+    if (!entries.length) {
+      el.mineEmptyText.textContent = retentionDays > 0
+        ? 'Movies and TV shows you request will show up here for ' + retentionDays + ' days.'
+        : 'Movies and TV shows you request will show up here.';
+      setView('mine-empty');
+      return;
+    }
+
+    el.mineList.innerHTML = '';
+    entries.forEach(function (entry) {
+      el.mineList.appendChild(renderHistoryCard(entry));
+    });
+    el.mineCount.textContent = entries.length + ' request' + (entries.length === 1 ? '' : 's') + windowText;
+    setView('mine');
+  }
+
   // ---------- actions ----------
 
   async function search() {
@@ -230,6 +302,21 @@
     }
 
     renderResults(data.results);
+  }
+
+  async function loadMyRequests() {
+    el.loadingText.textContent = 'Loading your requests…';
+    setView('loading');
+
+    let data;
+    try {
+      data = await api('/api/my-requests');
+    } catch (e) {
+      showError(e.message);
+      return;
+    }
+
+    renderHistory(data.requests, data.retentionDays);
   }
 
   async function requestItem(item, card, button) {
@@ -292,12 +379,33 @@
 
   // ---------- wiring ----------
 
+  function activateTab(tab) {
+    el.tabs.forEach(function (t) { t.classList.toggle('active', t === tab); });
+  }
+
   el.tabs.forEach(function (tab) {
     tab.addEventListener('click', function () {
-      if (tab.dataset.type === currentType) return;
+      // The "Mine" tab swaps the whole view; the type tabs stay on search
+      if (tab.dataset.view === 'mine') {
+        if (currentTab === 'mine') return;
+        haptic('light');
+        currentTab = 'mine';
+        activateTab(tab);
+        el.searchBar.classList.add('hidden');
+        el.hint.classList.add('hidden');
+        el.input.blur();
+        loadMyRequests();
+        return;
+      }
+
+      const sameType = tab.dataset.type === currentType;
+      if (currentTab === 'search' && sameType) return;
       haptic('light');
+      currentTab = 'search';
       currentType = tab.dataset.type;
-      el.tabs.forEach(function (t) { t.classList.toggle('active', t === tab); });
+      activateTab(tab);
+      el.searchBar.classList.remove('hidden');
+      el.hint.classList.remove('hidden');
       el.input.placeholder = currentType === 'movie'
         ? 'Title, title + year, or IMDb link…'
         : 'TV show title or IMDb link…';
@@ -312,7 +420,14 @@
   el.input.addEventListener('keydown', function (e) {
     if (e.key === 'Enter') search();
   });
-  el.retryBtn.addEventListener('click', search);
+  el.retryBtn.addEventListener('click', function () {
+    if (currentTab === 'mine') loadMyRequests();
+    else search();
+  });
+  el.mineRefresh.addEventListener('click', function () {
+    haptic('light');
+    loadMyRequests();
+  });
 
   // Auto-detect pasted IMDb links and search immediately
   el.input.addEventListener('paste', function () {

@@ -76,3 +76,6 @@ logs/
 *.tmp
 *.temp
 .cache/
+# Request history database
+data/
+*.db

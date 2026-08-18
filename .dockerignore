@@ -30,3 +30,5 @@ start.sh
 docker-compose.yml
 Dockerfile
 
+data/
+*.db

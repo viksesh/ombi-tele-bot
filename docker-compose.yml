@@ -20,10 +20,16 @@ services:
       - ENABLE_GROUP_AUTH=${ENABLE_GROUP_AUTH:-}
       - AUTHORIZED_GROUP_CHAT_IDS=${AUTHORIZED_GROUP_CHAT_IDS:-}
       - MAX_REQUESTS_PER_DAY=${MAX_REQUESTS_PER_DAY:-0}
+      # Per-user request history shown in the mini app's "Requests" tab
+      - REQUEST_HISTORY_DB=${REQUEST_HISTORY_DB:-/app/data/requests.db}
+      - REQUEST_HISTORY_DAYS=${REQUEST_HISTORY_DAYS:-60}
       - NZB_URL=${NZB_URL:-}
       - NZB_API_KEY=${NZB_API_KEY:-}
       - OMBI_AUTO_APPROVE_USER=${OMBI_AUTO_APPROVE_USER:-requests-auto}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}  # Set to WARNING or ERROR to reduce logs
+    volumes:
+      # Keeps the request history database across container restarts/upgrades
+      - ./data:/app/data
     logging:
       driver: "json-file"
       options:

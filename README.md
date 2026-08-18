@@ -11,6 +11,7 @@ A Telegram bot that allows users to request movies and TV shows through Ombi wit
 - 💬 **Chat-Based** - Everything stays within Telegram chat (no external apps)
 - 🔗 **IMDb Support** - Search using IMDb links or titles
 - ✨ **Telegram Mini App** - Optional in-Telegram web UI with instant search, posters, status badges, and one-tap requests (messaging flow still fully supported)
+- 📋 **Your Requests** - Mini app "Requests" tab showing everything you've requested recently, with each item's current status (requested / approved / available / denied)
 - 🔔 **Ombi Notifications** - Receive notifications when requests are approved/denied (via AWS Lambda webhook)
 - Dockerized for easy deployment on Ubuntu servers
 
@@ -43,6 +44,8 @@ The following environment variables are required:
 - `WEBAPP_PORT` - (Optional) Port the mini app web server listens on inside the container. Default: `8080`.
 - `WEBAPP_INIT_DATA_MAX_AGE` - (Optional) Max age in seconds of Telegram WebApp auth data before it's rejected. Default: `86400` (24h).
 - `MAX_REQUESTS_PER_DAY` - (Optional) Maximum number of successful requests a single user may submit per day (resets at UTC midnight). `0` (default) disables the limit. Counts are held in-memory and reset on restart.
+- `REQUEST_HISTORY_DB` - (Optional) Path to the SQLite file backing the mini app's "Requests" tab. Default: `data/requests.db` next to the code (`/app/data/requests.db` in Docker). Mount it on a volume so history survives container upgrades — `docker-compose.yml` already maps `./data`.
+- `REQUEST_HISTORY_DAYS` - (Optional) How many days of request history to keep per user. Older entries are pruned automatically. Default: `60`. Set to `0` to keep history forever.
 
 ### Telegram Mini App
 
@@ -55,6 +58,14 @@ Setup:
 3. (Optional) In [@BotFather](https://t.me/botfather), you can also configure the menu button / Main Mini App for nicer presentation.
 
 Security: every API call from the mini app is authenticated by validating Telegram's signed `initData` against the bot token (HMAC), and the same group-membership rules as the chat bot are enforced.
+
+#### Tracking your own requests ("Requests" tab)
+
+Ombi submits every request under a single service account (`OMBI_REQUEST_USER`, or `OMBI_AUTO_APPROVE_USER` for auto-approved ones), so it can't tell which Telegram user made a request. The bot therefore records each successful request locally, keyed by Telegram user ID, in a small SQLite database (`REQUEST_HISTORY_DB`).
+
+The mini app's **📋 Requests** tab lists that user's own requests, newest first, showing when each was requested and its status *right now* — the statuses come live from Ombi's request lists (cached for 60s), so an item moves from ⏳ Requested to 🗓️ Approved to ✅ Available on its own. Requests Ombi no longer knows about (deleted there) keep the status they had when submitted.
+
+Only the last `REQUEST_HISTORY_DAYS` days are kept (60 by default); older entries are pruned whenever history is written or read. Users only ever see their own entries.
 
 #### Reverse proxy requirements (important)
 
@@ -143,11 +154,14 @@ docker build -t ombi-tele-bot .
 ```bash
 docker run -d \
   --name ombi-tele-bot \
+  -v "$(pwd)/data:/app/data" \
   -e TELEGRAM_BOT_TOKEN="your_telegram_bot_token" \
   -e OMBI_URL="http://ombi:3579" \
   -e OMBI_API_KEY="your_ombi_api_key" \
   ombi-tele-bot
 ```
+
+**Note**: The `/app/data` volume holds the per-user request history shown in the mini app's "Requests" tab. Without it, history is lost whenever the container is recreated.
 
 **Note**: No port mapping needed - the bot uses Telegram polling. Webhook notifications are handled by AWS Lambda (see [`lambda/`](lambda/) directory).
 
@@ -222,6 +236,10 @@ See [TESTING.md](TESTING.md) for detailed local testing instructions.
 6. Use "Next ▶️" / "◀️ Previous" to navigate through results
 7. Click "✅ Request" to submit your request
 8. Click "❌ Cancel" to return to the main menu
+
+### Checking Your Requests
+
+In the mini app, tap the **📋 Requests** tab to see what you've requested in the last 60 days (configurable via `REQUEST_HISTORY_DAYS`), newest first. Each entry shows how long ago you requested it and its current status, refreshed from Ombi every time you open the tab — tap **↻ Refresh** to re-check.
 
 ### Setting Up Notification Webhooks
 
